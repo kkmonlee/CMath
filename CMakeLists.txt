@@ -3,5 +3,5 @@ project(CMath)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
-set(SOURCE_FILES main.cpp)
+set(SOURCE_FILES main.cpp cmath.h)
 add_executable(CMath ${SOURCE_FILES})
