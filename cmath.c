@@ -196,3 +196,101 @@ static cm_expr *base(state *s) {
 
     return ret;
 }
+
+static cm_expr *power(state *s) {
+    int sign = 1;
+    while (s->type == TOK_FUNCTION2 && (s->f2 == add || s->f2 == sub)) {
+        if (s->f2 == sub) {
+            sign = -sign;
+        }
+        next_token(s);
+    }
+
+    cm_expr *ret;
+
+    if (sign == 1) ret = base(s);
+    else {
+        ret = new_expr(base(s), 0);
+        ret->f1 = negate;
+    }
+
+    return ret;
+}
+
+static cm_expr *factor(state *s) {
+    cm_expr *ret = power(s);
+
+    while (s->type == TOK_FUNCTION2 && (s->f2 == pow)) {
+        cm_fun2 t = s->f2;
+        next_token(s);
+        ret = new_expr(ret, power(s));
+        ret->f2 = t;
+    }
+
+    return ret;
+}
+
+static cm_expr *term(state *s) {
+    cm_expr *ret = factor(s);
+
+    while (s->type == TOK_FUNCTION2 && (s->f2 == mul || s->f2 == divide || s->f2 == mod)) {
+        cm_fun2 t = s->f2;
+        next_token(s);
+        ret = new_expr(ret, factor(s));
+        ret->f2 = t;
+    }
+
+    return ret;
+}
+
+static cm_expr *expr(state *s) {
+    cm_expr *ret = term(s);
+
+    while (s->type == TOK_FUNCTION2 && (s->f2 == add || s->f2 == sub)) {
+        cm_fun2 t = s->f2;
+        next_token(s);
+        ret = new_expr(ret, term(s));
+        ret->f2 = t;
+    }
+
+    return ret;
+}
+
+double cm_eval(cm_expr *n) {
+    double ret;
+
+    if (n->bound) {
+        ret = *n->bound;
+    } else if (n->left == 0 && n->right == 0) {
+        ret = n->value;
+    } else if (n->left && n->right == 0) {
+        ret = n->f1(cm_eval(n->left));
+    } else {
+        ret = n->f2(cm_eval(n->left), cm_eval(n->right));
+    }
+
+    return ret;
+}
+
+static void optimise(cm_expr *n) {
+    if (n->bound) return;
+
+    if (n->left) optimise(n->left);
+    if (n->right) optimise(n->right);
+
+    if (n->left && n->right) {
+        if (n->left->left == 0 && n->left->right == 0 && n->right->left == 0 && n->right->right == 0 && n->right->bound == 0 && n->left->bound == 0) {
+            const double r = n->f2(n->left->value, n->right->value);
+            free(n->left);
+            free(n->right);
+            n->value = r;
+        }
+    } else if (n->left && !n->right) {
+        if (n->left->left == 0 && n->left->right == 0 && n->left->bound == 0) {
+            const double r = n->f1(n->left->value);
+            free(n->left);
+            n->left = 0;
+            n->value = r;
+        }
+    }
+}
