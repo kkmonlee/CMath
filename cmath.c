@@ -294,3 +294,57 @@ static void optimise(cm_expr *n) {
         }
     }
 }
+
+cm_expr *cm_compile(const char *expression, const cm_variable *lookup, int lookup_len, int *error) {
+    state s;
+    s.start = s.start = expression;
+    s.lookup = lookup;
+    s.lookup_len = lookup_len;
+
+    next_token(&s);
+    cm_expr *root = expr(&s);
+
+    if (s.type != TOK_END) {
+        if (error) {
+            *error = s.next - s.start;
+        }
+        if (*error == 0) {
+            *error = 1;
+        }
+    } else {
+        optimise(root);
+        if (error) *error = 0;
+    }
+
+    return root;
+}
+
+double cm_interp(const char *expression, int *error) {
+    cm_expr *n = cm_compile(expression, 0, 0, error);
+    double ret = cm_eval(n);
+    free(n);
+    return ret;
+}
+
+static void pn (const cm_expr *n, int depth) {
+    int i;
+    for (i = 0; i < depth; ++i) {
+        printf(" ");
+    }
+
+    if (n->bound) {
+        printf("bound %p\n", n->bound);
+    } else if (n->left == 0 && n->right == 0) {
+        printf("%f\n", n->value);
+    } else if (n->left && n->right == 0) {
+        printf("f1 %p\n", n->left);
+    } else {
+        printf("f2 %p %p\n", n->left, n->right);
+        pn(n->left, depth + 1);
+        pn(n->right, depth + 1);
+    }
+}
+
+void cm_print(const cm_expr *n) {
+    pn(n, 0);
+}
