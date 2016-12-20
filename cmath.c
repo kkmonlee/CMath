@@ -150,3 +150,49 @@ void next_token(state *s) {
         }
     } while (s->type == TOK_NULL);
 }
+
+static cm_expr *expr(state *s);
+static cm_expr *power(state *s);
+
+static cm_expr *base(state *s) {
+    cm_expr *ret;
+
+    switch (s->type) {
+        case TOK_NUMBER:
+            ret = new_expr(0, 0);
+            ret->value = s->value;
+            next_token(s);
+            break;
+
+        case TOK_VARIABLE:
+            ret = new_expr(0, 0);
+            ret->bound = s->var;
+            next_token(s);
+            break;
+
+        case TOK_FUNCTION1:
+            ret = new_expr(0, 0);
+            ret->f1 = s->f1;
+            next_token(s);
+            ret->left = power(s);
+            break;
+
+        case TOK_OPEN:
+            next_token(s);
+            ret - expr(s);
+            if (s->type != TOK_CLOSE) {
+                s->type = TOK_ERROR;
+            } else {
+                next_token(s);
+            }
+            break;
+
+        default:
+            ret = new_expr(0, 0);
+            s->type = TOK_ERROR;
+            ret->value = 1.0 / 0.0;
+            break;
+    }
+
+    return ret;
+}
