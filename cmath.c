@@ -327,10 +327,7 @@ double cm_interp(const char *expression, int *error) {
 }
 
 static void pn (const cm_expr *n, int depth) {
-    int i;
-    for (i = 0; i < depth; ++i) {
-        printf(" ");
-    }
+    printf("%*s", depth, "");
 
     if (n->bound) {
         printf("bound %p\n", n->bound);
