@@ -5,12 +5,21 @@
 #ifndef __CMATH_H__
 #define __CMATH_H__
 
-typedef double (*cm_fun1) (double);
-typedef double (*cm_fun2) (double, double);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef double (*cm_fun1)(double);
+
+typedef double (*cm_fun2)(double, double);
 
 typedef struct cm_expr {
     struct cm_expr *left, *right;
-    union {double value; cm_fun1 f1; cm_fun2 f2;};
+    union {
+        double value;
+        cm_fun1 f1;
+        cm_fun2 f2;
+    };
     const double *bound;
 } cm_expr;
 
@@ -34,4 +43,7 @@ void cm_print(const cm_expr *n);
 // Frees expression
 void cm_free(cm_expr *n);
 
+#ifdef __cplusplus
+}
+#endif
 #endif //__CMATH_H__
