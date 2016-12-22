@@ -256,7 +256,7 @@ static cm_expr *expr(state *s) {
     return ret;
 }
 
-double cm_eval(cm_expr *n) {
+double cm_eval(const cm_expr *n) {
     double ret;
 
     if (n->bound) {

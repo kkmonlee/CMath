@@ -26,7 +26,7 @@ double cm_interp(const char *expression, int *error);
 cm_expr *cm_compile(const char *expression, const cm_variable *lookup, int lookup_len, int *error);
 
 // Evaluate the expression
-double cm_eval(cm_expr *n);
+double cm_eval(const cm_expr *n);
 
 // Prints debugging information
 void cm_print(const cm_expr *n);
