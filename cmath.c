@@ -29,6 +29,7 @@ static cm_expr *new_expr(cm_expr *l, cm_expr *r) {
 }
 
 void cm_free(cm_expr *n) {
+    if (!n) return;
     if (n->left) cm_free(n->left);
     if (n->right) cm_free(n->right);
     free(n);
@@ -190,7 +191,7 @@ static cm_expr *base(state *s) {
         default:
             ret = new_expr(0, 0);
             s->type = TOK_ERROR;
-            ret->value = 1.0 / 0.0;
+            ret->value = 0.0 / 0.0;
             break;
     }
 
@@ -305,24 +306,29 @@ cm_expr *cm_compile(const char *expression, const cm_variable *lookup, int looku
     cm_expr *root = expr(&s);
 
     if (s.type != TOK_END) {
+        cm_free(root);
         if (error) {
-            *error = s.next - s.start;
+            *error = (int) (s.next - s.start);
+            if (*error == 0) *error = 1;
         }
-        if (*error == 0) {
-            *error = 1;
-        }
+        return 0;
     } else {
         optimise(root);
         if (error) *error = 0;
+        return root;
     }
-
-    return root;
 }
 
 double cm_interp(const char *expression, int *error) {
     cm_expr *n = cm_compile(expression, 0, 0, error);
-    double ret = cm_eval(n);
-    free(n);
+    double ret;
+    if (n) {
+        ret = cm_eval(n);
+        free(n);
+    } else {
+        ret = 0.0 / 0.0;
+    }
+
     return ret;
 }
 
