@@ -98,7 +98,10 @@ static double add(double a, double b) {return a + b;};
 static double sub(double a, double b) {return a - b;}
 static double mul(double a, double b) {return a * b;}
 static double divide(double a, double b) {return a / b;}
-static double mod(double a, double b) {return ((long long) b) ? ((long long) a % (long long) b) : (0.0 / 0.0);}
+static double mod(double a, double b) {
+    if (((long long) b) == 0) return 0.0 / 0.0;
+    return ((long long) a % (long long) b);
+}
 static double negate(double a) {return -a;}
 
 void next_token(state *s) {
