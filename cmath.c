@@ -298,11 +298,11 @@ static void optimise(cm_expr *n) {
     }
 }
 
-cm_expr *cm_compile(const char *expression, const cm_variable *lookup, int lookup_len, int *error) {
+cm_expr *cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error) {
     state s;
     s.start = s.start = expression;
-    s.lookup = lookup;
-    s.lookup_len = lookup_len;
+    s.lookup = variables;
+    s.lookup_len = var_count;
 
     next_token(&s);
     cm_expr *root = expr(&s);
