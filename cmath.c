@@ -326,7 +326,7 @@ double cm_interp(const char *expression, int *error) {
     double ret;
     if (n) {
         ret = cm_eval(n);
-        free(n);
+        cm_free(n);
     } else {
         ret = 0.0 / 0.0;
     }
