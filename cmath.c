@@ -69,7 +69,8 @@ static const builtin *find_function(const char *name, int len) {
     while (imax >= imin) {
         const int i = (imin + ((imax - imin) / 2));
         int c = strncmp(name, functions[i].name, (size_t) len);
-        if (!c) c = (int) (len - strlen(functions[i].name));
+        if (!c)
+            c = '\0' - functions[i].name[len];
         if (c == 0) {
             return functions + i;
         } else if (c > 0) {
