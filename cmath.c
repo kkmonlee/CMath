@@ -87,7 +87,7 @@ static const double *find_var(const state *s, const char *name, int len) {
     int i;
     if (!s->lookup) return 0;
     for (i = 0; i < s->lookup_len; ++i) {
-        if (s->lookup[i].name[len] == '\0' && strncmp(name, s->lookup[i].name, len) == 0) {
+        if (strncmp(name, s->lookup[i].name, len) == 0 && s->lookup[i].name[len] == '\0') {
             return s->lookup[i].value;
         }
     }
