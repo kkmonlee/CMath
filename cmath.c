@@ -199,6 +199,14 @@ static cm_expr *base(state *s) {
             ret = new_expr(CM_FUNCTION0, 0, 0);
             ret->f0 = s->f0;
             next_token(s);
+            if (s->type == TOK_OPEN) {
+                next_token(s);
+                if (s->type != TOK_CLOSE) {
+                    s->type = TOK_ERROR;
+                } else {
+                    next_token(s);
+                }
+            }
             break;
 
         case TOK_FUNCTION1:
