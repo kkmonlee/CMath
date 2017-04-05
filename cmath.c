@@ -11,21 +11,32 @@
 #include <stdio.h>
 
 enum {
-    TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX, TOK_FUNCTION1, TOK_FUNCTION2, TOK_VARIABLE, TOK_SEP, TOK_ERROR
+    TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX, TOK_FUNCTION0, TOK_FUNCTION1, TOK_FUNCTION2, TOK_VARIABLE, TOK_SEP, TOK_ERROR
 };
 
-typedef struct {
+enum {
+    CM_CONSTANT = -2
+};
+
+typedef struct state {
     const char *start;
     const char *next;
     int type;
-    union {double value; cm_fun1 f1; cm_fun2 f2; const double *var;};
+    union {
+        double value;
+        cm_fun0 f0;
+        cm_fun1 f1;
+        cm_fun2 f2;
+        const double *bound;
+    };
 
     const cm_variable *lookup;
     int lookup_len;
 } state;
 
-static cm_expr *new_expr(cm_expr *l, cm_expr *r) {
+static cm_expr *new_expr(int type, cm_expr *l, cm_expr *r) {
     cm_expr *ret = malloc(sizeof(cm_expr));
+    ret->type = type;
     ret->left = l;
     ret->right = r;
     ret->bound = 0;
@@ -39,47 +50,37 @@ void cm_free(cm_expr *n) {
     free(n);
 }
 
-typedef struct {
-    const char *name;
-    union {
-        const void *v;
-        double *value;
-        cm_fun1 f1;
-        cm_fun2 f2;
-    };
-    int arity;
-} builtin;
-
 static const double pi = 3.14159265358979323846;
 static const double e = 2.71828182845904523536;
 
-static const builtin functions[] = {
-        {"abs", {fabs}, 1},
-        {"acos", {acos}, 1},
-        {"asin", {asin}, 1},
-        {"atan", {atan}, 1},
-        {"atan2", {atan2}, 2},
-        {"ceil", {ceil}, 1},
-        {"cos", {cos}, 1},
-        {"cosh", {cosh}, 1},
-        {"e", {&e}, 0},
-        {"exp", {exp}, 1},
-        {"floor", {floor}, 1},
-        {"ln", {log}, 1},
-        {"log", {log10}, 1},
-        {"pi", {&pi}, 0},
-        {"pow", {pow}, 2},
-        {"sin", {sin}, 1},
-        {"sinh", {sinh}, 1},
-        {"sqrt", {sqrt}, 1},
-        {"tan", {tan}, 1},
-        {"tanh", {tanh}, 1},
+static const cm_variable functions[] = {
+        {"abs", fabs, CM_FUNCTION1},
+        {"acos", acos, CM_FUNCTION1},
+        {"asin", asin, CM_FUNCTION1},
+        {"atan", atan, CM_FUNCTION1},
+        {"atan2", atan2, CM_FUNCTION2},
+        {"ceil", ceil, CM_FUNCTION1},
+        {"cos", cos, CM_FUNCTION1},
+        {"cosh", cosh, CM_FUNCTION1},
+        {"e", &e, CM_VARIABLE},
+        {"exp", exp, CM_FUNCTION1},
+        {"floor", floor, CM_FUNCTION1},
+        {"ln", log, CM_FUNCTION1},
+        {"log", log10, CM_FUNCTION1},
+        {"pi", &pi, CM_VARIABLE},
+        {"pow", pow, CM_FUNCTION2},
+        {"sin", sin, CM_FUNCTION1},
+        {"sinh", sinh, CM_FUNCTION1},
+        {"sqrt", sqrt, CM_FUNCTION1},
+        {"tan", tan, CM_FUNCTION1},
+        {"tanh", tanh, CM_FUNCTION1},
+        {0}
 
 };
 
-static const builtin *find_function(const char *name, int len) {
+static const cm_variable *find_function(const char *name, int len) {
     int imin = 0;
-    int imax = sizeof(functions) / sizeof(builtin) - 2;
+    int imax = sizeof(functions) / sizeof(cm_variable) - 2;
 
     while (imax >= imin) {
         const int i = (imin + ((imax - imin) / 2));
@@ -98,12 +99,12 @@ static const builtin *find_function(const char *name, int len) {
     return 0;
 }
 
-static const double *find_var(const state *s, const char *name, int len) {
+static const cm_variable *find_var(const state *s, const char *name, int len) {
     int i;
     if (!s->lookup) return 0;
     for (i = 0; i < s->lookup_len; ++i) {
         if (strncmp(name, s->lookup[i].name, len) == 0 && s->lookup[i].name[len] == '\0') {
-            return s->lookup[i].value;
+            return s->lookup + i;
         }
     }
 
@@ -133,32 +134,26 @@ void next_token(state *s) {
             if (s->next[0] >= 'a' && s->next[0] <= 'z') {
                 const char *start;
                 start = s->next;
-                while ((s->next[] >= 'a' && s->next[0] <= 'z') || (s->next[0] >= '0' && s->next[0] <= '9'))
+                while ((s->next[0] >= 'a' && s->next[0] <= 'z') || (s->next[0] >= '0' && s->next[0] <= '9'))
                     s->next++;
-
-                const double *var = find_var(s, start, (s->next - start));
-                if (var) {
-                    s->type = TOK_VARIABLE;
-                    s->var = var;
+                const cm_variable *var = find_var(s, start, s->next - start);
+                if (!var)
+                    var = find_function(start, s->next - start);
+                if (!var) {
+                    s->type = TOK_ERROR;
                 } else {
-                    if (s->next - start > 15) {
-                        s->type = TOK_ERROR;
-                    } else {
-                        const builtin *f = find_function(start, s->next - start);
-                        if (!f) {
-                            s->type = TOK_ERROR;
-                        } else {
-                            if (f->arity == 0) {
-                                s->type = TOK_NUMBER;
-                                s->value = *f->value;
-                            } else if (f->arity == 1) {
-                                s->type = TOK_FUNCTION1;
-                                s->f1 = f->f1;
-                            } else if (f->arity == 2) {
-                                s->type = TOK_FUNCTION2;
-                                s->f2 = f->f2;
-                            }
-                        }
+                    if (var->type == CM_VARIABLE) {
+                        s->type = TOK_VARIABLE;
+                        s->bound = var->value;
+                    } else if (var->type == CM_FUNCTION0) {
+                        s->type = TOK_FUNCTION0;
+                        s->f0 = var->value;
+                    } else if (var->type == CM_FUNCTION1) {
+                        s->type = TOK_FUNCTION1;
+                        s->f1 = var->value;
+                    } else if (var->type == CM_FUNCTION2) {
+                        s->type = TOK_FUNCTION2;
+                        s->f2 = var->value;
                     }
                 }
             } else {
@@ -189,26 +184,32 @@ static cm_expr *base(state *s) {
 
     switch (s->type) {
         case TOK_NUMBER:
-            ret = new_expr(0, 0);
+            ret = new_expr(CM_CONSTANT, 0, 0);
             ret->value = s->value;
             next_token(s);
             break;
 
         case TOK_VARIABLE:
-            ret = new_expr(0, 0);
-            ret->bound = s->var;
+            ret = new_expr(CM_VARIABLE, 0, 0);
+            ret->bound = s->bound;
+            next_token(s);
+            break;
+
+        case TOK_FUNCTION0:
+            ret = new_expr(CM_FUNCTION0, 0, 0);
+            ret->f0 = s->f0;
             next_token(s);
             break;
 
         case TOK_FUNCTION1:
-            ret = new_expr(0, 0);
+            ret = new_expr(CM_FUNCTION1, 0, 0);
             ret->f1 = s->f1;
             next_token(s);
             ret->left = power(s);
             break;
 
         case TOK_FUNCTION2:
-            ret = new_expr(0, 0);
+            ret = new_expr(CM_FUNCTION2, 0, 0);
             ret->f2 = s->f2;
             next_token(s);
 
@@ -243,7 +244,7 @@ static cm_expr *base(state *s) {
             break;
 
         default:
-            ret = new_expr(0, 0);
+            ret = new_expr(0, 0, 0);
             s->type = TOK_ERROR;
             ret->value = 0.0 / 0.0;
             break;
@@ -265,7 +266,7 @@ static cm_expr *power(state *s) {
 
     if (sign == 1) ret = base(s);
     else {
-        ret = new_expr(base(s), 0);
+        ret = new_expr(CM_FUNCTION1, base(s), 0);
         ret->f1 = negate;
     }
 
@@ -278,7 +279,7 @@ static cm_expr *factor(state *s) {
     while (s->type == TOK_INFIX && (s->f2 == pow)) {
         cm_fun2 t = s->f2;
         next_token(s);
-        ret = new_expr(ret, power(s));
+        ret = new_expr(CM_FUNCTION2, ret, power(s));
         ret->f2 = t;
     }
 
@@ -291,7 +292,7 @@ static cm_expr *term(state *s) {
     while (s->type == TOK_INFIX && (s->f2 == mul || s->f2 == divide || s->f2 == fmod)) {
         cm_fun2 t = s->f2;
         next_token(s);
-        ret = new_expr(ret, factor(s));
+        ret = new_expr(CM_FUNCTION2, ret, factor(s));
         ret->f2 = t;
     }
 
@@ -304,7 +305,7 @@ static cm_expr *expr(state *s) {
     while (s->type == TOK_INFIX && (s->f2 == add || s->f2 == sub)) {
         cm_fun2 t = s->f2;
         next_token(s);
-        ret = new_expr(ret, term(s));
+        ret = new_expr(CM_FUNCTION2, ret, term(s));
         ret->f2 = t;
     }
 
@@ -316,30 +317,31 @@ static cm_expr *list(state *s) {
 
     while (s->type == TOK_SEP) {
         next_token(s);
-        ret = new_expr(ret, term(s));
+        ret = new_expr(CM_FUNCTION2, ret, term(s));
         ret->f2 = comma;
     }
     return ret;
 }
 
 double cm_eval(const cm_expr *n) {
-    double ret;
-
-    if (n->bound) {
-        ret = *n->bound;
-    } else if (n->left == 0 && n->right == 0) {
-        ret = n->value;
-    } else if (n->left && n->right == 0) {
-        ret = n->f1(cm_eval(n->left));
-    } else {
-        ret = n->f2(cm_eval(n->left), cm_eval(n->right));
+    switch (n->type) {
+        case CM_CONSTANT:
+            return n->value;
+        case CM_VARIABLE:
+            return *n->bound;
+        case CM_FUNCTION0:
+            return n->f0();
+        case CM_FUNCTION1:
+            return n->f1(cm_eval(n->left));
+        case CM_FUNCTION2:
+            return n->f2(cm_eval(n->left), cm_eval(n->right));
+        default:
+            return 0.0/0.0;
     }
-
-    return ret;
 }
 
 static void optimise(cm_expr *n) {
-    if (n->bound) return;
+/*    if (n->bound) return;
 
     if (n->left) optimise(n->left);
     if (n->right) optimise(n->right);
@@ -358,7 +360,7 @@ static void optimise(cm_expr *n) {
             n->left = 0;
             n->value = r;
         }
-    }
+    }*/
 }
 
 cm_expr *cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error) {

@@ -9,23 +9,32 @@
 extern "C" {
 #endif
 
+typedef double (*cm_fun0)(void);
+
 typedef double (*cm_fun1)(double);
 
 typedef double (*cm_fun2)(double, double);
 
 typedef struct cm_expr {
     struct cm_expr *left, *right;
+    int type;
     union {
         double value;
+        const double *bound;
+        cm_fun0 f0;
         cm_fun1 f1;
         cm_fun2 f2;
     };
-    const double *bound;
 } cm_expr;
 
-typedef struct {
+enum {
+    CM_FUNCTION0 = -1, CM_VARIABLE = 0, CM_FUNCTION1 = 1, CM_FUNCTION2 = 2
+};
+
+typedef struct cm_variable {
     const char *name;
-    const double value;
+    const void *value;
+    int type;
 } cm_variable;
 
 // Parses the input expression, evaluates it and frees it
