@@ -34,7 +34,7 @@ double cm_eval(const cm_expr *expr);
 void cm_free(cm_expr *expr);
 ```
 
-###`cm_interp`
+### `cm_interp`
 `cm_interp()` takes an expression and immediately returns the result of it. If there is a format or parsing error, `cm_interp()` returns `NaN`.
 
 If the `error` pointer argument is not 0, then `cm_interp()` will set `*error` to the position of the parse error on failure, and set `*error` to 0 on success.
