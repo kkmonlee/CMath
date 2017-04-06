@@ -144,7 +144,7 @@ Here are some example performance numbers taken from a benchmark:
 |**Expression** |**`cm_eval` time**| **native C time** | **difference**|
 |----------------------|----------------------------|---------------------------|---------------------|
 |`sqrt(a^1.5+a^2.5)`|14.478 ms|15.641 ms|8% faster|
-|`a+5`|563 ms|765 ms|35% faster|
+|`a+5`|563 ms|765 ms|36% faster|
 |`a+(5*2)`|563 ms|765 ms|36% faster|
 |`(a+5)*2`|563 ms|1422 ms|153% faster|
 |`(1/(a+1)+2/(a+2)+3/(a+3))`|1266 ms | 5516 ms | 336% faster|
