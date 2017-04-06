@@ -14,7 +14,7 @@ It gives you the ability to evaluate mathematical expressions at runtime without
 - Released under GNU GPL v3 license
 - Thread-safe, assuming your **`malloc`** is
 
-# Example
+## Example
 ```c
 #include "cmath.h"
 
