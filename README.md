@@ -1,9 +1,9 @@
-#CMath
+# CMath
 CMath is an extremely small recursive top-down (descent) parser and a mathematical evaluation engine.
 
 It gives you the ability to evaluate mathematical expressions at runtime without adding more code to your project. Additionally, CMath also supports the standard C mathematical functions and runtime binding of variables.
 
-##Features
+## Features
 
 - **ANSI C** with no dependencies
 - Single source and header file
@@ -14,7 +14,7 @@ It gives you the ability to evaluate mathematical expressions at runtime without
 - Released under GNU GPL v3 license
 - Thread-safe, assuming your **`malloc`** is
 
-##Example
+# Example
 ```c
 #include "cmath.h"
 
