@@ -132,7 +132,7 @@ Which produces the output:
 $	example "sqrt(x^2+y2)"
 	Evaluating:
 		sqrt(x^2+y2)
-			      ^
+			 ^
 	Error near here
 ```
 
