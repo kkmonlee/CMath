@@ -15,20 +15,37 @@ typedef double (*cm_fun1)(double);
 
 typedef double (*cm_fun2)(double, double);
 
+typedef double (*cm_fun3)(double, double, double);
+
+typedef double (*cm_fun4)(double, double, double, double);
+
+typedef double (*cm_fun5)(double, double, double, double, double);
+
+typedef double (*cm_fun6)(double, double, double, double, double, double);
+
+typedef double (*cm_fun7)(double, double, double, double, double, double, double);
+
+typedef union {
+    cm_fun0 f0; cm_fun1 f1; cm_fun2 f2; cm_fun3 f3; cm_fun4 f4; cm_fun5 f5; cm_fun6 f6; cm_fun7 f7;
+} cm_fun;
+
 typedef struct cm_expr {
     struct cm_expr *left, *right;
     int type;
     union {
         double value;
         const double *bound;
-        cm_fun0 f0;
-        cm_fun1 f1;
-        cm_fun2 f2;
+        cm_fun fun;
     };
+    int member_count;
+    struct cm_expr *members[];
 } cm_expr;
 
+#define CM_MASK_ARIT 0x00000007 /* Three bits, Arity, max is 8 */
+#define CM_FLAG_TYPE 0x00000018 /* Two bits, 1 = constant, 2 = variable, 3 = function */
+
 enum {
-    CM_FUNCTION0 = -1, CM_VARIABLE = 0, CM_FUNCTION1 = 1, CM_FUNCTION2 = 2
+    CM_CONST = 1 << 3, CM_VAR = 2 << 3, CM_FUN = 3 << 3
 };
 
 typedef struct cm_variable {

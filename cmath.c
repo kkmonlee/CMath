@@ -10,12 +10,10 @@
 #include <string.h>
 #include <stdio.h>
 
-enum {
-    TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX, TOK_FUNCTION0, TOK_FUNCTION1, TOK_FUNCTION2, TOK_VARIABLE, TOK_SEP, TOK_ERROR
-};
-
-enum {
-    CM_CONSTANT = -2
+enum {TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX,
+    TOK_VARIABLE, TOK_SEP, TOK_ERROR, TOK_FUNCTION0, TOK_FUNCTION1,
+    TOK_FUNCTION2, TOK_FUNCTION3, TOK_FUNCTION4, TOK_FUNCTION5, TOK_FUNCTION6,
+    TOK_FUNCTION7
 };
 
 typedef struct state {
@@ -24,9 +22,7 @@ typedef struct state {
     int type;
     union {
         double value;
-        cm_fun0 f0;
-        cm_fun1 f1;
-        cm_fun2 f2;
+        cm_fun fun;
         const double *bound;
     };
 
@@ -34,19 +30,35 @@ typedef struct state {
     int lookup_len;
 } state;
 
-static cm_expr *new_expr(int type, cm_expr *l, cm_expr *r) {
-    cm_expr *ret = malloc(sizeof(cm_expr));
+static int cm_get_type(const int type) {
+    if (type == 0) return CM_VAR;
+    return type & CM_FLAG_TYPE;
+}
+
+static int cm_get_arity(const int type) {
+    return type & CM_MASK_ARIT;
+}
+
+static cm_expr *new_expr(const int type, const cm_expr *members[]) {
+    int member_count = cm_get_arity(type);
+    size_t member_size = sizeof(cm_expr*) *member_count;
+    cm_expr *ret = malloc(sizeof(cm_expr) + member_size);
+    if (!members) {
+        memset(ret->members, 0, member_size);
+    } else {
+        memcpy(ret->members, members, member_size);
+    }
     ret->type = type;
-    ret->left = l;
-    ret->right = r;
     ret->bound = 0;
     return ret;
 }
 
 void cm_free(cm_expr *n) {
+    int i;
     if (!n) return;
-    if (n->left) cm_free(n->left);
-    if (n->right) cm_free(n->right);
+    for (i = n->member_count - 1; i >= 0; i--) {
+        cm_free(n->members[i]);
+    }
     free(n);
 }
 
@@ -54,31 +66,31 @@ static const double pi = 3.14159265358979323846;
 static const double e = 2.71828182845904523536;
 
 static const cm_variable functions[] = {
-        {"abs", fabs, CM_FUNCTION1},
-        {"acos", acos, CM_FUNCTION1},
-        {"asin", asin, CM_FUNCTION1},
-        {"atan", atan, CM_FUNCTION1},
-        {"atan2", atan2, CM_FUNCTION2},
-        {"ceil", ceil, CM_FUNCTION1},
-        {"cos", cos, CM_FUNCTION1},
-        {"cosh", cosh, CM_FUNCTION1},
-        {"e", &e, CM_VARIABLE},
-        {"exp", exp, CM_FUNCTION1},
-        {"floor", floor, CM_FUNCTION1},
-        {"ln", log, CM_FUNCTION1},
-        {"log", log10, CM_FUNCTION1},
-        {"pi", &pi, CM_VARIABLE},
-        {"pow", pow, CM_FUNCTION2},
-        {"sin", sin, CM_FUNCTION1},
-        {"sinh", sinh, CM_FUNCTION1},
-        {"sqrt", sqrt, CM_FUNCTION1},
-        {"tan", tan, CM_FUNCTION1},
-        {"tanh", tanh, CM_FUNCTION1},
+        {"abs", fabs,     CM_FUN | 1},
+        {"acos", acos,    CM_FUN | 1},
+        {"asin", asin,    CM_FUN | 1},
+        {"atan", atan,    CM_FUN | 1},
+        {"atan2", atan2,  CM_FUN | 2},
+        {"ceil", ceil,    CM_FUN | 1},
+        {"cos", cos,      CM_FUN | 1},
+        {"cosh", cosh,    CM_FUN | 1},
+        {"e", &e,         CM_VAR},
+        {"exp", exp,      CM_FUN | 1},
+        {"floor", floor,  CM_FUN | 1},
+        {"ln", log,       CM_FUN | 1},
+        {"log", log10,    CM_FUN | 1},
+        {"pi", &pi,       CM_VAR},
+        {"pow", pow,      CM_FUN | 2},
+        {"sin", sin,      CM_FUN | 1},
+        {"sinh", sinh,    CM_FUN | 1},
+        {"sqrt", sqrt,    CM_FUN | 1},
+        {"tan", tan,      CM_FUN | 1},
+        {"tanh", tanh,    CM_FUN | 1},
         {0}
 
 };
 
-static const cm_variable *find_builtin(const char *name, int len) {
+static const cm_variable *find_function(const char *name, int len) {
     int imin = 0;
     int imax = sizeof(functions) / sizeof(cm_variable) - 2;
 
@@ -132,38 +144,37 @@ void next_token(state *s) {
             s->type = TOK_NUMBER;
         } else {
             if (s->next[0] >= 'a' && s->next[0] <= 'z') {
+                int arity, type;
                 const char *start;
                 start = s->next;
                 while ((s->next[0] >= 'a' && s->next[0] <= 'z') || (s->next[0] >= '0' && s->next[0] <= '9'))
                     s->next++;
                 const cm_variable *var = find_lookup(s, start, s->next - start);
                 if (!var)
-                    var = find_builtin(start, s->next - start);
+                    var = find_function(start, s->next - start);
                 if (!var) {
                     s->type = TOK_ERROR;
                 } else {
-                    if (var->type == CM_VARIABLE) {
-                        s->type = TOK_VARIABLE;
-                        s->bound = var->value;
-                    } else if (var->type == CM_FUNCTION0) {
-                        s->type = TOK_FUNCTION0;
-                        s->f0 = var->value;
-                    } else if (var->type == CM_FUNCTION1) {
-                        s->type = TOK_FUNCTION1;
-                        s->f1 = var->value;
-                    } else if (var->type == CM_FUNCTION2) {
-                        s->type = TOK_FUNCTION2;
-                        s->f2 = var->value;
+                    type = cm_get_type(var->type);
+                    arity = cm_get_arity(var->type);
+                    switch (type) {
+                        case CM_VAR:
+                            s->type = TOK_VARIABLE;
+                            s->bound = var->value;
+                            break;
+                        case CM_FUN:
+                            s->type = TOK_FUNCTION0 + arity;
+                            s->fun.f0 = (void*) var->value;
                     }
                 }
             } else {
                 switch (s->next++[0]) {
-                    case '+': s->type = TOK_INFIX; s->f2 = add; break;
-                    case '-': s->type = TOK_INFIX; s->f2 = sub; break;
-                    case '*': s->type = TOK_INFIX; s->f2 = mul; break;
-                    case '/': s->type = TOK_INFIX; s->f2 = divide; break;
-                    case '^': s->type = TOK_INFIX; s->f2 = pow; break;
-                    case '%': s->type = TOK_INFIX; s->f2 = fmod; break;
+                    case '+': s->type = TOK_INFIX; s->fun.f2 = add; break;
+                    case '-': s->type = TOK_INFIX; s->fun.f2 = sub; break;
+                    case '*': s->type = TOK_INFIX; s->fun.f2 = mul; break;
+                    case '/': s->type = TOK_INFIX; s->fun.f2 = divide; break;
+                    case '^': s->type = TOK_INFIX; s->fun.f2 = pow; break;
+                    case '%': s->type = TOK_INFIX; s->fun.f2 = fmod; break;
                     case '(': s->type = TOK_OPEN; break;
                     case ')': s->type = TOK_CLOSE; break;
                     case ',': s->type = TOK_SEP; break;
@@ -181,23 +192,25 @@ static cm_expr *power(state *s);
 
 static cm_expr *base(state *s) {
     cm_expr *ret;
+    int arity;
 
     switch (s->type) {
         case TOK_NUMBER:
-            ret = new_expr(CM_CONSTANT, 0, 0);
+            ret = new_expr(CM_CONST, 0);
             ret->value = s->value;
             next_token(s);
             break;
 
         case TOK_VARIABLE:
-            ret = new_expr(CM_VARIABLE, 0, 0);
+            ret = new_expr(CM_VAR, 0);
             ret->bound = s->bound;
             next_token(s);
             break;
 
         case TOK_FUNCTION0:
-            ret = new_expr(CM_FUNCTION0, 0, 0);
-            ret->f0 = s->f0;
+            ret = new_expr(CM_FUN, 0);
+            ret = new_expr(CM_FUN, 0);
+            ret->fun.f0 = s->fun.f0;
             next_token(s);
             if (s->type == TOK_OPEN) {
                 next_token(s);
@@ -210,35 +223,38 @@ static cm_expr *base(state *s) {
             break;
 
         case TOK_FUNCTION1:
-            ret = new_expr(CM_FUNCTION1, 0, 0);
-            ret->f1 = s->f1;
+            ret = new_expr(CM_FUN | 1, 0);
+            ret->fun.f0 = s->fun.f0;
             next_token(s);
-            ret->left = power(s);
+            ret->members[0] = power(s);
             break;
 
-        case TOK_FUNCTION2:
-            ret = new_expr(CM_FUNCTION2, 0, 0);
-            ret->f2 = s->f2;
+        case TOK_FUNCTION2: case TOK_FUNCTION3: case TOK_FUNCTION4:
+        case TOK_FUNCTION5: case TOK_FUNCTION6: case TOK_FUNCTION7:
+            arity = s->type - TOK_FUNCTION0;
+
+            ret = new_expr(CM_FUN | arity, 0);
+            ret->fun.f0 = s->fun.f0;
             next_token(s);
 
             if (s->type != TOK_OPEN) {
                 s->type = TOK_ERROR;
             } else {
-                next_token(s);
-                ret->left = expr(s);
-
-                if (s->type != TOK_SEP) {
+                int i;
+                for(i = 0; i < arity; i++) {
+                    next_token(s);
+                    ret->members[i] = expr(s);
+                    if(s->type != TOK_SEP) {
+                        break;
+                    }
+                }
+                if(s->type != TOK_CLOSE || i < arity - 1) {
                     s->type = TOK_ERROR;
                 } else {
                     next_token(s);
-                    ret->right = expr(s);
-                    if (s->type != TOK_CLOSE) {
-                        s->type = TOK_ERROR;
-                    } else {
-                        next_token(s);
-                    }
                 }
             }
+
             break;
 
         case TOK_OPEN:
@@ -252,7 +268,7 @@ static cm_expr *base(state *s) {
             break;
 
         default:
-            ret = new_expr(0, 0, 0);
+            ret = new_expr(0, 0);
             s->type = TOK_ERROR;
             ret->value = 0.0 / 0.0;
             break;
@@ -263,8 +279,8 @@ static cm_expr *base(state *s) {
 
 static cm_expr *power(state *s) {
     int sign = 1;
-    while (s->type == TOK_INFIX && (s->f2 == add || s->f2 == sub)) {
-        if (s->f2 == sub) {
+    while (s->type == TOK_INFIX && (s->fun.f2 == add || s->fun.f2 == sub)) {
+        if (s->fun.f2 == sub) {
             sign = -sign;
         }
         next_token(s);
@@ -274,8 +290,10 @@ static cm_expr *power(state *s) {
 
     if (sign == 1) ret = base(s);
     else {
-        ret = new_expr(CM_FUNCTION1, base(s), 0);
-        ret->f1 = negate;
+        ret = new_expr(CM_FUN | 1, (const cm_expr *[]) {
+                base(s)
+        });
+        ret->fun.f1 = negate;
     }
 
     return ret;
@@ -284,11 +302,13 @@ static cm_expr *power(state *s) {
 static cm_expr *factor(state *s) {
     cm_expr *ret = power(s);
 
-    while (s->type == TOK_INFIX && (s->f2 == pow)) {
-        cm_fun2 t = s->f2;
+    while (s->type == TOK_INFIX && (s->fun.f2 == pow)) {
+        cm_fun2 t = s->fun.f2;
         next_token(s);
-        ret = new_expr(CM_FUNCTION2, ret, power(s));
-        ret->f2 = t;
+        ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
+                ret, power(s)
+        });
+        ret->fun.f2 = t;
     }
 
     return ret;
@@ -297,11 +317,13 @@ static cm_expr *factor(state *s) {
 static cm_expr *term(state *s) {
     cm_expr *ret = factor(s);
 
-    while (s->type == TOK_INFIX && (s->f2 == mul || s->f2 == divide || s->f2 == fmod)) {
-        cm_fun2 t = s->f2;
+    while (s->type == TOK_INFIX && (s->fun.f2 == mul || s->fun.f2 == divide || s->fun.f2 == fmod)) {
+        cm_fun2 t = s->fun.f2;
         next_token(s);
-        ret = new_expr(CM_FUNCTION2, ret, factor(s));
-        ret->f2 = t;
+        ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
+                ret, factor(s)
+        });
+        ret->fun.f2 = t;
     }
 
     return ret;
@@ -310,11 +332,13 @@ static cm_expr *term(state *s) {
 static cm_expr *expr(state *s) {
     cm_expr *ret = term(s);
 
-    while (s->type == TOK_INFIX && (s->f2 == add || s->f2 == sub)) {
-        cm_fun2 t = s->f2;
+    while (s->type == TOK_INFIX && (s->fun.f2 == add || s->fun.f2 == sub)) {
+        cm_fun2 t = s->fun.f2;
         next_token(s);
-        ret = new_expr(CM_FUNCTION2, ret, term(s));
-        ret->f2 = t;
+        ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
+                ret, term(s)
+        });
+        ret->fun.f2 = t;
     }
 
     return ret;
@@ -325,26 +349,33 @@ static cm_expr *list(state *s) {
 
     while (s->type == TOK_SEP) {
         next_token(s);
-        ret = new_expr(CM_FUNCTION2, ret, term(s));
-        ret->f2 = comma;
+        ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
+                ret, term(s)
+        });
+        ret->fun.f2 = comma;
     }
     return ret;
 }
 
 double cm_eval(const cm_expr *n) {
-    switch (n->type) {
-        case CM_CONSTANT:
-            return n->value;
-        case CM_VARIABLE:
-            return *n->bound;
-        case CM_FUNCTION0:
-            return n->f0();
-        case CM_FUNCTION1:
-            return n->f1(cm_eval(n->left));
-        case CM_FUNCTION2:
-            return n->f2(cm_eval(n->left), cm_eval(n->right));
-        default:
-            return 0.0/0.0;
+    switch(cm_get_type(n->type)) {
+        case CM_CONST: return n->value;
+        case CM_VAR: return *n->bound;
+        case CM_FUN:
+            switch(cm_get_arity(n->type)) {
+#define m(e) cm_eval(n->members[e])
+                case 0: return n->fun.f0();
+                case 1: return n->fun.f1(m(0));
+                case 2: return n->fun.f2(m(0), m(1));
+                case 3: return n->fun.f3(m(0), m(1), m(2));
+                case 4: return n->fun.f4(m(0), m(1), m(2), m(3));
+                case 5: return n->fun.f5(m(0), m(1), m(2), m(3), m(4));
+                case 6: return n->fun.f6(m(0), m(1), m(2), m(3), m(4), m(5));
+                case 7: return n->fun.f7(m(0), m(1), m(2), m(3), m(4), m(5), m(6));
+                default: return 0.0/0.0;
+#undef m
+            }
+        default: return 0.0 / 0.0;
     }
 }
 
@@ -408,18 +439,27 @@ double cm_interp(const char *expression, int *error) {
 }
 
 static void pn (const cm_expr *n, int depth) {
+    int i, arity;
     printf("%*s", depth, "");
 
-    if (n->bound) {
-        printf("bound %p\n", n->bound);
-    } else if (n->left == 0 && n->right == 0) {
-        printf("%f\n", n->value);
-    } else if (n->left && n->right == 0) {
-        printf("f1 %p\n", n->left);
-    } else {
-        printf("f2 %p %p\n", n->left, n->right);
-        pn(n->left, depth + 1);
-        pn(n->right, depth + 1);
+    switch (cm_get_type(n->type)) {
+        case CM_CONST:
+            printf("%f\n", n->value);
+            break;
+        case CM_VAR:
+            printf("bound %p\n", n->bound);
+            break;
+        case CM_FUN:
+            arity = cm_get_arity(n->type);
+            printf("f%d", arity);
+            for (i = 0; i < arity; i++) {
+                printf(" %p", n->members[i]);
+            }
+            printf("\n");
+            for (i = 0; i < arity; i++) {
+                pn(n->members[i], depth + 1);
+            }
+            break;
     }
 }
 
