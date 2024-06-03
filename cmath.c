@@ -52,25 +52,57 @@ void cm_init_pool(cm_expr_pool *pool) {
     pool->nextFree = 0;
 }
 
+// Function to compact memory pool
+void cm_compact_pool(cm_expr_pool *pool) {
+    int dest = 0; // destination index for compaction
+
+    for (int src = 0; src < pool->nextFree; ++src) {
+        cm_expr *node = &pool->nodes[src];
+
+        // if the node is in use and not at its correct position
+        if (node->member_count >= 0 && src != dest) {
+            // move the node and its members to the new location
+            memmove(&pool->nodes[dest], 
+                node,
+                sizeof(cm_expr) + sizeof(cm_expr*) * node->member_count
+            );
+
+            // update pointers in parent nodes
+            for (int i = 0; i < pool->nextFree; ++i) {
+                cm_expr *parent = &pool->nodes[i];
+                for (int j = 0; j < parent->member_count; ++j) {
+                    if (parent->members[j] == node) {
+                        parent->members[j] = &pool->nodes[dest];
+                    }
+                }
+            }
+        }
+
+        // if the node was in use, move the destination index
+        if (node->member_count >= 0) {
+            dest += node->member_count + 1;
+        }
+    }
+    pool->nextFree = dest;
+}
+
 cm_expr *cm_pool_alloc(cm_expr_pool *pool, int member_count) {
     assert(member_count >= 0);
-    if (pool->nextFree >= POOL_SIZE) {
-        fprintf(stderr, "Error: memory pool exhausted!\n");
-        exit(1);
-    }
-    size_t required_size = sizeof(cm_expr) + sizeof(cm_expr*) * member_count;
 
-    cm_expr *node = realloc(&pool->nodes[pool->nextFree], required_size);
-
-    if (node == NULL) {
-        fprintf(stderr, "Error: memory allocation failed!\n");
-        exit(1);
+    // try to allocate without compaction first
+    if (pool->nextFree + member_count < POOL_SIZE) {
+        return new_expr(0, NULL, pool);
     }
 
-    memset(node, 0, required_size);
-    node->member_count = member_count;
-    pool->nextFree += 1;
-    return node;
+    // compaction failed, so compact the pool
+    cm_compact_pool(pool);
+
+    if (pool->nextFree + member_count < POOL_SIZE) {
+        return new_expr(0, NULL, pool);
+    } else {
+        fprintf(stderr, "Expression pool exhausted\n");
+        exit(1);
+    }
 }
 
 // Reset the pool to the initial state
