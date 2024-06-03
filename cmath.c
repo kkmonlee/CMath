@@ -9,6 +9,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <assert.h>
 
 enum {
     TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX,
@@ -25,6 +26,14 @@ typedef enum {
     CM_ERROR_INVALID_FUNCTION_CALL
 } cm_error_code;
 
+#define POOL_SIZE 1024
+typedef struct {
+    cm_expr *nodes[POOL_SIZE];
+    int nextFree; // index of the next free node
+} cm_expr_pool;
+
+cm_expr_pool globalPool = { {0}, 0 };
+
 typedef struct state {
     const char *start;
     const char *next;
@@ -39,6 +48,28 @@ typedef struct state {
     int lookup_len;
 } state;
 
+void cm_init_pool(cm_expr_pool *pool) {
+    pool->nextFree = 0;
+}
+
+cm_expr *cm_pool_alloc(cm_expr_pool *pool, int member_count) {
+    assert(member_count >= 0);
+    if (pool->nextFree + member_count >= POOL_SIZE) {
+        fprintf(stderr, "Error: memory pool exhausted!\n");
+        exit(1);
+    }
+
+    cm_expr *node = &pool->nodes[pool->nextFree];
+    memset(node, 0, sizeof(cm_expr) + sizeof(cm_expr*) * member_count);
+    node->member_count = member_count + 1;
+    return node;
+}
+
+// Reset the pool to the initial state
+void cm_reset_pool(cm_expr_pool *pool) {
+    pool->nextFree = 0;
+}
+
 static int cm_get_type(const int type) {
     if (type == 0) return CM_VAR;
     return type & CM_FLAG_TYPE;
@@ -48,17 +79,14 @@ static int cm_get_arity(const int type) {
     return type & CM_MASK_ARIT;
 }
 
-static cm_expr *new_expr(const int type, const cm_expr *members[]) {
+static cm_expr *new_expr(const int type, const cm_expr *members[], cm_expr_pool *pool) {
     int member_count = cm_get_arity(type);
-    size_t member_size = sizeof(cm_expr*) *member_count;
-    cm_expr *ret = malloc(sizeof(cm_expr) + member_size);
-    if (!members) {
-        memset(ret->members, 0, member_size);
-    } else {
-        memcpy(ret->members, members, member_size);
-    }
+    cm_expr *ret = cm_pool_alloc(pool, member_count);
     ret->type = type;
-    ret->bound = 0;
+    if (members) {
+        memcpy(ret->members, members, sizeof(cm_expr*) * member_count);
+    }
+
     return ret;
 }
 
@@ -219,20 +247,20 @@ static cm_expr *base(state *s, cm_error_code *error) {
 
     switch (s->type) {
         case TOK_NUMBER:
-            ret = new_expr(CM_CONST, 0);
+            ret = new_expr(CM_CONST, 0, &globalPool);
             ret->value = s->value;
             next_token(s);
             break;
 
         case TOK_VARIABLE:
-            ret = new_expr(CM_VAR, 0);
+            ret = new_expr(CM_VAR, 0, &globalPool);
             ret->bound = s->bound;
             next_token(s);
             break;
 
         case TOK_FUNCTION0:
-            ret = new_expr(CM_FUN, 0);
-            ret = new_expr(CM_FUN, 0);
+            ret = new_expr(CM_FUN, 0, &globalPool);
+            ret = new_expr(CM_FUN, 0, &globalPool);
             ret->fun.f0 = s->fun.f0;
             next_token(s);
             if (s->type == TOK_OPEN) {
@@ -246,7 +274,7 @@ static cm_expr *base(state *s, cm_error_code *error) {
             break;
 
         case TOK_FUNCTION1:
-            ret = new_expr(CM_FUN | 1, 0);
+            ret = new_expr(CM_FUN | 1, 0, &globalPool);
             ret->fun.f0 = s->fun.f0;
             next_token(s);
             ret->members[0] = power(s, error);
@@ -256,7 +284,7 @@ static cm_expr *base(state *s, cm_error_code *error) {
         case TOK_FUNCTION5: case TOK_FUNCTION6: case TOK_FUNCTION7:
             arity = s->type - TOK_FUNCTION0;
 
-            ret = new_expr(CM_FUN | arity, 0);
+            ret = new_expr(CM_FUN | arity, 0, &globalPool);
             ret->fun.f0 = s->fun.f0;
             next_token(s);
 
@@ -291,7 +319,7 @@ static cm_expr *base(state *s, cm_error_code *error) {
             break;
 
         default:
-            ret = new_expr(0, 0);
+            ret = new_expr(0, 0, &globalPool);
             s->type = TOK_ERROR;
             ret->value = 0.0 / 0.0;
             break;
@@ -315,7 +343,7 @@ static cm_expr *power(state *s, cm_error_code *error) {
     else {
         ret = new_expr(CM_FUN | 1, (const cm_expr *[]) {
                 base(s, error)
-        });
+        }, &globalPool);
         ret->fun.f1 = negate;
     }
 
@@ -330,7 +358,7 @@ static cm_expr *factor(state *s, cm_error_code *error) {
         next_token(s);
         ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
                 ret, power(s, error)
-        });
+        }, &globalPool);
         ret->fun.f2 = t;
     }
 
@@ -345,7 +373,7 @@ static cm_expr *term(state *s, cm_error_code *error) {
         next_token(s);
         ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
                 ret, factor(s, error)
-        });
+        }, &globalPool);
         ret->fun.f2 = t;
     }
 
@@ -360,7 +388,7 @@ static cm_expr *expr(state *s, cm_error_code *error) {
         next_token(s);
         ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
                 ret, term(s, error)
-        });
+        }, &globalPool);
         ret->fun.f2 = t;
     }
 
@@ -374,7 +402,7 @@ static cm_expr *list(state *s, cm_error_code *error) {
         next_token(s);
         ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
                 ret, term(s, error)
-        });
+        }, &globalPool);
         ret->fun.f2 = comma;
     }
     return ret;
@@ -430,6 +458,7 @@ static void optimise(cm_expr *n) {
 }
 
 cm_expr *cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error) {
+    cm_init_pool(&globalPool);
     state s;
     s.start = s.start = expression;
     s.lookup = variables;
