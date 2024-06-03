@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <pthread.h>
 
 enum {
     TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX,
@@ -30,9 +31,10 @@ typedef enum {
 typedef struct {
     cm_expr *nodes[POOL_SIZE];
     int nextFree; // index of the next free node
+    pthread_mutex_t mutex;
 } cm_expr_pool;
 
-cm_expr_pool globalPool = { {0}, 0 };
+cm_expr_pool globalPool = { {0}, 0, PTHREAD_MUTEX_INITIALIZER };
 
 typedef struct state {
     const char *start;
@@ -49,6 +51,7 @@ typedef struct state {
 } state;
 
 void cm_init_pool(cm_expr_pool *pool) {
+    pthread_mutex_init(&pool->mutex, NULL);
     pool->nextFree = 0;
 }
 
@@ -88,6 +91,7 @@ void cm_compact_pool(cm_expr_pool *pool) {
 
 cm_expr *cm_pool_alloc(cm_expr_pool *pool, int member_count) {
     assert(member_count >= 0);
+    pthread_mutex_lock(&pool->mutex); // lock mutex
 
     // try to allocate without compaction first
     if (pool->nextFree + member_count < POOL_SIZE) {
@@ -98,16 +102,20 @@ cm_expr *cm_pool_alloc(cm_expr_pool *pool, int member_count) {
     cm_compact_pool(pool);
 
     if (pool->nextFree + member_count < POOL_SIZE) {
+        pthread_mutex_unlock(&pool->mutex);
         return new_expr(0, NULL, pool);
     } else {
         fprintf(stderr, "Expression pool exhausted\n");
+        pthread_mutex_unlock(&pool->mutex);
         exit(1);
     }
 }
 
 // Reset the pool to the initial state
 void cm_reset_pool(cm_expr_pool *pool) {
+    pthread_mutex_lock(&pool->mutex);
     pool->nextFree = 0;
+    pthread_mutex_unlock(&pool->mutex);
 }
 
 static int cm_get_type(const int type) {
