@@ -54,14 +54,22 @@ void cm_init_pool(cm_expr_pool *pool) {
 
 cm_expr *cm_pool_alloc(cm_expr_pool *pool, int member_count) {
     assert(member_count >= 0);
-    if (pool->nextFree + member_count >= POOL_SIZE) {
+    if (pool->nextFree >= POOL_SIZE) {
         fprintf(stderr, "Error: memory pool exhausted!\n");
         exit(1);
     }
+    size_t required_size = sizeof(cm_expr) + sizeof(cm_expr*) * member_count;
 
-    cm_expr *node = &pool->nodes[pool->nextFree];
-    memset(node, 0, sizeof(cm_expr) + sizeof(cm_expr*) * member_count);
-    node->member_count = member_count + 1;
+    cm_expr *node = realloc(&pool->nodes[pool->nextFree], required_size);
+
+    if (node == NULL) {
+        fprintf(stderr, "Error: memory allocation failed!\n");
+        exit(1);
+    }
+
+    memset(node, 0, required_size);
+    node->member_count = member_count;
+    pool->nextFree += 1;
     return node;
 }
 
