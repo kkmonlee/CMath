@@ -10,11 +10,20 @@
 #include <string.h>
 #include <stdio.h>
 
-enum {TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX,
+enum {
+    TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX,
     TOK_VARIABLE, TOK_SEP, TOK_ERROR, TOK_FUNCTION0, TOK_FUNCTION1,
     TOK_FUNCTION2, TOK_FUNCTION3, TOK_FUNCTION4, TOK_FUNCTION5, TOK_FUNCTION6,
     TOK_FUNCTION7
 };
+
+typedef enum {
+    CM_ERROR_NONE,
+    CM_ERROR_SYNTAX,
+    CM_ERROR_DIVISION_BY_ZERO,
+    CM_ERROR_UNDEFINED_VARIABLE,
+    CM_ERROR_INVALID_FUNCTION_CALL
+} cm_error_code;
 
 typedef struct state {
     const char *start;
@@ -184,15 +193,29 @@ void next_token(state *s) {
             }
         }
     } while (s->type == TOK_NULL);
+
+    if (s->type == TOK_ERROR) {
+        s->next--;
+        return;
+    }
 }
 
-static cm_expr *list(state *s);
-static cm_expr *expr(state *s);
-static cm_expr *power(state *s);
+static cm_expr *list(state *s, cm_error_code *error);
+static cm_expr *expr(state *s, cm_error_code *error);
+static cm_expr *power(state *s, cm_error_code *error);
+static cm_expr *factor(state *s, cm_error_code *error);
+static cm_expr *term(state *s, cm_error_code *error);
 
-static cm_expr *base(state *s) {
+static cm_expr *base(state *s, cm_error_code *error) {
     cm_expr *ret;
     int arity;
+
+    if (s->type == TOK_VARIABLE) {
+        if (!s->bound) {
+            *error = CM_ERROR_UNDEFINED_VARIABLE;
+            return NULL;
+        }
+    }
 
     switch (s->type) {
         case TOK_NUMBER:
@@ -226,7 +249,7 @@ static cm_expr *base(state *s) {
             ret = new_expr(CM_FUN | 1, 0);
             ret->fun.f0 = s->fun.f0;
             next_token(s);
-            ret->members[0] = power(s);
+            ret->members[0] = power(s, error);
             break;
 
         case TOK_FUNCTION2: case TOK_FUNCTION3: case TOK_FUNCTION4:
@@ -243,7 +266,7 @@ static cm_expr *base(state *s) {
                 int i;
                 for(i = 0; i < arity; i++) {
                     next_token(s);
-                    ret->members[i] = expr(s);
+                    ret->members[i] = expr(s, error);
                     if(s->type != TOK_SEP) {
                         break;
                     }
@@ -259,7 +282,7 @@ static cm_expr *base(state *s) {
 
         case TOK_OPEN:
             next_token(s);
-            ret = list(s);
+            ret = list(s, error);
             if (s->type != TOK_CLOSE) {
                 s->type = TOK_ERROR;
             } else {
@@ -277,7 +300,7 @@ static cm_expr *base(state *s) {
     return ret;
 }
 
-static cm_expr *power(state *s) {
+static cm_expr *power(state *s, cm_error_code *error) {
     int sign = 1;
     while (s->type == TOK_INFIX && (s->fun.f2 == add || s->fun.f2 == sub)) {
         if (s->fun.f2 == sub) {
@@ -288,10 +311,10 @@ static cm_expr *power(state *s) {
 
     cm_expr *ret;
 
-    if (sign == 1) ret = base(s);
+    if (sign == 1) ret = base(s, error);
     else {
         ret = new_expr(CM_FUN | 1, (const cm_expr *[]) {
-                base(s)
+                base(s, error)
         });
         ret->fun.f1 = negate;
     }
@@ -299,14 +322,14 @@ static cm_expr *power(state *s) {
     return ret;
 }
 
-static cm_expr *factor(state *s) {
-    cm_expr *ret = power(s);
+static cm_expr *factor(state *s, cm_error_code *error) {
+    cm_expr *ret = power(s, error);
 
     while (s->type == TOK_INFIX && (s->fun.f2 == pow)) {
         cm_fun2 t = s->fun.f2;
         next_token(s);
         ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
-                ret, power(s)
+                ret, power(s, error)
         });
         ret->fun.f2 = t;
     }
@@ -314,14 +337,14 @@ static cm_expr *factor(state *s) {
     return ret;
 }
 
-static cm_expr *term(state *s) {
-    cm_expr *ret = factor(s);
+static cm_expr *term(state *s, cm_error_code *error) {
+    cm_expr *ret = factor(s, error);
 
     while (s->type == TOK_INFIX && (s->fun.f2 == mul || s->fun.f2 == divide || s->fun.f2 == fmod)) {
         cm_fun2 t = s->fun.f2;
         next_token(s);
         ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
-                ret, factor(s)
+                ret, factor(s, error)
         });
         ret->fun.f2 = t;
     }
@@ -329,14 +352,14 @@ static cm_expr *term(state *s) {
     return ret;
 }
 
-static cm_expr *expr(state *s) {
-    cm_expr *ret = term(s);
+static cm_expr *expr(state *s, cm_error_code *error) {
+    cm_expr *ret = term(s, error);
 
     while (s->type == TOK_INFIX && (s->fun.f2 == add || s->fun.f2 == sub)) {
         cm_fun2 t = s->fun.f2;
         next_token(s);
         ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
-                ret, term(s)
+                ret, term(s, error)
         });
         ret->fun.f2 = t;
     }
@@ -344,29 +367,34 @@ static cm_expr *expr(state *s) {
     return ret;
 }
 
-static cm_expr *list(state *s) {
-    cm_expr *ret = expr(s);
+static cm_expr *list(state *s, cm_error_code *error) {
+    cm_expr *ret = expr(s, error);
 
     while (s->type == TOK_SEP) {
         next_token(s);
         ret = new_expr(CM_FUN | 2, (const cm_expr *[]) {
-                ret, term(s)
+                ret, term(s, error)
         });
         ret->fun.f2 = comma;
     }
     return ret;
 }
 
-double cm_eval(const cm_expr *n) {
+double cm_eval(const cm_expr *n, cm_error_code *error) {
     switch(cm_get_type(n->type)) {
         case CM_CONST: return n->value;
         case CM_VAR: return *n->bound;
         case CM_FUN:
             switch(cm_get_arity(n->type)) {
-#define m(e) cm_eval(n->members[e])
+#define m(e) cm_eval(n->members[e], error)
                 case 0: return n->fun.f0();
                 case 1: return n->fun.f1(m(0));
-                case 2: return n->fun.f2(m(0), m(1));
+                case 2:
+                    if (n->fun.f2 == divide && cm_eval(n->members[1], error) == 0) {
+                        *error = CM_ERROR_DIVISION_BY_ZERO;
+                        return 0.0 / 0.0; // NaN
+                    }
+                    return n->fun.f2(m(0), m(1));
                 case 3: return n->fun.f3(m(0), m(1), m(2));
                 case 4: return n->fun.f4(m(0), m(1), m(2), m(3));
                 case 5: return n->fun.f5(m(0), m(1), m(2), m(3), m(4));
@@ -377,29 +405,28 @@ double cm_eval(const cm_expr *n) {
             }
         default: return 0.0 / 0.0;
     }
+    *error = CM_ERROR_SYNTAX;
+    return 0.0 / 0.0;
 }
 
 static void optimise(cm_expr *n) {
-/*    if (n->bound) return;
+    if (!n) return;
 
-    if (n->left) optimise(n->left);
-    if (n->right) optimise(n->right);
+    for (int i = 0; i < n->member_count; ++i) {
+        optimise(n->members[i]);
+    }
 
-    if (n->left && n->right) {
-        if (n->left->left == 0 && n->left->right == 0 && n->right->left == 0 && n->right->right == 0 && n->right->bound == 0 && n->left->bound == 0) {
-            const double r = n->f2(n->left->value, n->right->value);
-            free(n->left);
-            free(n->right);
-            n->value = r;
+    // constant folding (simple case)
+    if (cm_get_type(n->type) == CM_FUN && n->member_count == 2) {
+        if (cm_get_type(n->members[0]->type) == CM_CONST &&
+            cm_get_type(n->members[1]->type) == CM_CONST) {
+            n->type = CM_CONST;
+            n->value = n->fun.f2(n->members[0]->value, n->members[1]->value);
+            cm_free(n->members[0]);
+            cm_free(n->members[1]);
+            n->member_count = 0;
         }
-    } else if (n->left && !n->right) {
-        if (n->left->left == 0 && n->left->right == 0 && n->left->bound == 0) {
-            const double r = n->f1(n->left->value);
-            free(n->left);
-            n->left = 0;
-            n->value = r;
-        }
-    }*/
+    }
 }
 
 cm_expr *cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error) {
@@ -408,16 +435,17 @@ cm_expr *cm_compile(const char *expression, const cm_variable *variables, int va
     s.lookup = variables;
     s.lookup_len = var_count;
 
+    cm_error_code parse_error = CM_ERROR_NONE;
     next_token(&s);
-    cm_expr *root = list(&s);
+    cm_expr *root = list(&s, parse_error);
 
-    if (s.type != TOK_END) {
+    if (parse_error != CM_ERROR_NONE) {
         cm_free(root);
         if (error) {
             *error = (int) (s.next - s.start);
             if (*error == 0) *error = 1;
         }
-        return 0;
+        return NULL;
     } else {
         optimise(root);
         if (error) *error = 0;
@@ -425,11 +453,11 @@ cm_expr *cm_compile(const char *expression, const cm_variable *variables, int va
     }
 }
 
-double cm_interp(const char *expression, int *error) {
+double cm_interp(const char *expression, cm_error_code *error) {
     cm_expr *n = cm_compile(expression, 0, 0, error);
     double ret;
     if (n) {
-        ret = cm_eval(n);
+        ret = cm_eval(n, error);
         cm_free(n);
     } else {
         ret = 0.0 / 0.0;
@@ -438,7 +466,7 @@ double cm_interp(const char *expression, int *error) {
     return ret;
 }
 
-static void pn (const cm_expr *n, int depth) {
+static void pn(const cm_expr *n, int depth) {
     int i, arity;
     printf("%*s", depth, "");
 
