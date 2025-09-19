@@ -61,7 +61,7 @@ double cm_interp(const char *expression, int *error);
 cm_expr *cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error);
 
 // Evaluate the expression
-double cm_eval(const cm_expr *n);
+double cm_eval(const cm_expr *n, int *error);
 
 // Prints debugging information
 void cm_print(const cm_expr *n);

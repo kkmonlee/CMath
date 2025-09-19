@@ -29,12 +29,15 @@ typedef enum {
 
 #define POOL_SIZE 1024
 typedef struct {
-    cm_expr *nodes[POOL_SIZE];
+    cm_expr nodes[POOL_SIZE];
     int nextFree; // index of the next free node
     pthread_mutex_t mutex;
 } cm_expr_pool;
 
 cm_expr_pool globalPool = { {0}, 0, PTHREAD_MUTEX_INITIALIZER };
+
+// forward declaration
+static cm_expr *new_expr(const int type, const cm_expr *members[], cm_expr_pool *pool);
 
 typedef struct state {
     const char *start;
@@ -65,7 +68,7 @@ void cm_compact_pool(cm_expr_pool *pool) {
         // if the node is in use and not at its correct position
         if (node->member_count >= 0 && src != dest) {
             // move the node and its members to the new location
-            memmove(&pool->nodes[dest], 
+            memmove(&pool->nodes[dest],
                 node,
                 sizeof(cm_expr) + sizeof(cm_expr*) * node->member_count
             );
@@ -94,16 +97,23 @@ cm_expr *cm_pool_alloc(cm_expr_pool *pool, int member_count) {
     pthread_mutex_lock(&pool->mutex); // lock mutex
 
     // try to allocate without compaction first
-    if (pool->nextFree + member_count < POOL_SIZE) {
-        return new_expr(0, NULL, pool);
+    if (pool->nextFree + member_count + 1 <= POOL_SIZE) {
+        cm_expr *ret = &pool->nodes[pool->nextFree];
+        pool->nextFree += 1; // Just allocate one node for now, simpler
+        ret->member_count = member_count;
+        pthread_mutex_unlock(&pool->mutex);
+        return ret;
     }
 
     // compaction failed, so compact the pool
     cm_compact_pool(pool);
 
-    if (pool->nextFree + member_count < POOL_SIZE) {
+    if (pool->nextFree + member_count + 1 <= POOL_SIZE) {
+        cm_expr *ret = &pool->nodes[pool->nextFree];
+        pool->nextFree += 1;
+        ret->member_count = member_count;
         pthread_mutex_unlock(&pool->mutex);
-        return new_expr(0, NULL, pool);
+        return ret;
     } else {
         fprintf(stderr, "Expression pool exhausted\n");
         pthread_mutex_unlock(&pool->mutex);
@@ -131,6 +141,7 @@ static cm_expr *new_expr(const int type, const cm_expr *members[], cm_expr_pool 
     int member_count = cm_get_arity(type);
     cm_expr *ret = cm_pool_alloc(pool, member_count);
     ret->type = type;
+    // member_count is already set by cm_pool_alloc
     if (members) {
         memcpy(ret->members, members, sizeof(cm_expr*) * member_count);
     }
@@ -144,7 +155,8 @@ void cm_free(cm_expr *n) {
     for (i = n->member_count - 1; i >= 0; i--) {
         cm_free(n->members[i]);
     }
-    free(n);
+    // pool-allocated memory doesn't need explicit free
+    // will be reused when the pool is reset
 }
 
 static const double pi = 3.14159265358979323846;
@@ -276,19 +288,19 @@ void next_token(state *s) {
     }
 }
 
-static cm_expr *list(state *s, cm_error_code *error);
-static cm_expr *expr(state *s, cm_error_code *error);
-static cm_expr *power(state *s, cm_error_code *error);
-static cm_expr *factor(state *s, cm_error_code *error);
-static cm_expr *term(state *s, cm_error_code *error);
+static cm_expr *list(state *s, int *error);
+static cm_expr *expr(state *s, int *error);
+static cm_expr *power(state *s, int *error);
+static cm_expr *factor(state *s, int *error);
+static cm_expr *term(state *s, int *error);
 
-static cm_expr *base(state *s, cm_error_code *error) {
+static cm_expr *base(state *s, int *error) {
     cm_expr *ret;
     int arity;
 
     if (s->type == TOK_VARIABLE) {
         if (!s->bound) {
-            *error = CM_ERROR_UNDEFINED_VARIABLE;
+            if (error) *error = CM_ERROR_UNDEFINED_VARIABLE;
             return NULL;
         }
     }
@@ -376,7 +388,7 @@ static cm_expr *base(state *s, cm_error_code *error) {
     return ret;
 }
 
-static cm_expr *power(state *s, cm_error_code *error) {
+static cm_expr *power(state *s, int *error) {
     int sign = 1;
     while (s->type == TOK_INFIX && (s->fun.f2 == add || s->fun.f2 == sub)) {
         if (s->fun.f2 == sub) {
@@ -398,7 +410,7 @@ static cm_expr *power(state *s, cm_error_code *error) {
     return ret;
 }
 
-static cm_expr *factor(state *s, cm_error_code *error) {
+static cm_expr *factor(state *s, int *error) {
     cm_expr *ret = power(s, error);
 
     while (s->type == TOK_INFIX && (s->fun.f2 == pow)) {
@@ -413,7 +425,7 @@ static cm_expr *factor(state *s, cm_error_code *error) {
     return ret;
 }
 
-static cm_expr *term(state *s, cm_error_code *error) {
+static cm_expr *term(state *s, int *error) {
     cm_expr *ret = factor(s, error);
 
     while (s->type == TOK_INFIX && (s->fun.f2 == mul || s->fun.f2 == divide || s->fun.f2 == fmod)) {
@@ -428,7 +440,7 @@ static cm_expr *term(state *s, cm_error_code *error) {
     return ret;
 }
 
-static cm_expr *expr(state *s, cm_error_code *error) {
+static cm_expr *expr(state *s, int *error) {
     cm_expr *ret = term(s, error);
 
     while (s->type == TOK_INFIX && (s->fun.f2 == add || s->fun.f2 == sub)) {
@@ -443,7 +455,7 @@ static cm_expr *expr(state *s, cm_error_code *error) {
     return ret;
 }
 
-static cm_expr *list(state *s, cm_error_code *error) {
+static cm_expr *list(state *s, int *error) {
     cm_expr *ret = expr(s, error);
 
     while (s->type == TOK_SEP) {
@@ -456,7 +468,7 @@ static cm_expr *list(state *s, cm_error_code *error) {
     return ret;
 }
 
-double cm_eval(const cm_expr *n, cm_error_code *error) {
+double cm_eval(const cm_expr *n, int *error) {
     switch(cm_get_type(n->type)) {
         case CM_CONST: return n->value;
         case CM_VAR: return *n->bound;
@@ -467,7 +479,7 @@ double cm_eval(const cm_expr *n, cm_error_code *error) {
                 case 1: return n->fun.f1(m(0));
                 case 2:
                     if (n->fun.f2 == divide && cm_eval(n->members[1], error) == 0) {
-                        *error = CM_ERROR_DIVISION_BY_ZERO;
+                        if (error) *error = CM_ERROR_DIVISION_BY_ZERO;
                         return 0.0 / 0.0; // NaN
                     }
                     return n->fun.f2(m(0), m(1));
@@ -481,7 +493,7 @@ double cm_eval(const cm_expr *n, cm_error_code *error) {
             }
         default: return 0.0 / 0.0;
     }
-    *error = CM_ERROR_SYNTAX;
+    if (error) *error = CM_ERROR_SYNTAX;
     return 0.0 / 0.0;
 }
 
@@ -508,15 +520,15 @@ static void optimise(cm_expr *n) {
 cm_expr *cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error) {
     cm_init_pool(&globalPool);
     state s;
-    s.start = s.start = expression;
+    s.start = s.next = expression;
     s.lookup = variables;
     s.lookup_len = var_count;
 
-    cm_error_code parse_error = CM_ERROR_NONE;
+    int parse_error = 0;
     next_token(&s);
-    cm_expr *root = list(&s, parse_error);
+    cm_expr *root = list(&s, &parse_error);
 
-    if (parse_error != CM_ERROR_NONE) {
+    if (parse_error != 0) {
         cm_free(root);
         if (error) {
             *error = (int) (s.next - s.start);
@@ -530,7 +542,7 @@ cm_expr *cm_compile(const char *expression, const cm_variable *variables, int va
     }
 }
 
-double cm_interp(const char *expression, cm_error_code *error) {
+double cm_interp(const char *expression, int *error) {
     cm_expr *n = cm_compile(expression, 0, 0, error);
     double ret;
     if (n) {

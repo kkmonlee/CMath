@@ -15,7 +15,7 @@ void bench(const char *expr, cm_fun1 func) {
     double tmp;
     clock_t start;
 
-    cm_variable lk = {"a", tmp};
+    cm_variable lk = {"a", &tmp};
 
     printf("Expression: %s\n", expr);
 
@@ -37,13 +37,18 @@ void bench(const char *expr, cm_fun1 func) {
         printf("\tinf\n");
 
     printf("interp ");
-    cm_expr *n = cm_compile(expr, &lk, 1, 0);
+    int error = 0;
+    cm_expr *n = cm_compile(expr, &lk, 1, &error);
+    if (!n) {
+        printf("Compilation failed with error %d\n", error);
+        return;
+    }
     start = clock();
     d = 0;
     for (j = 0; j < loops; ++j) {
         for (i = 0; i < loops; ++i) {
             tmp = i;
-            d += cm_eval(n);
+            d += cm_eval(n, NULL);
         }
     }
 

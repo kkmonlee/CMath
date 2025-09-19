@@ -1,7 +1,16 @@
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.10)
 project(CMath)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+set(CMAKE_C_STANDARD 99)
 
-set(SOURCE_FILES cmath.h cmath.c benchmark.c example.c)
-add_executable(CMath ${SOURCE_FILES})
+# Create library from cmath.c
+add_library(cmath cmath.c)
+target_link_libraries(cmath m pthread)
+
+# Create example executable
+add_executable(example example.c)
+target_link_libraries(example cmath)
+
+# Create benchmark executable
+add_executable(benchmark benchmark.c)
+target_link_libraries(benchmark cmath)
