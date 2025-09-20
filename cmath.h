@@ -29,6 +29,8 @@ typedef union {
     cm_fun0 f0; cm_fun1 f1; cm_fun2 f2; cm_fun3 f3; cm_fun4 f4; cm_fun5 f5; cm_fun6 f6; cm_fun7 f7;
 } cm_fun;
 
+// Optimization structures (opaque pointers for internal use)
+
 typedef struct cm_expr {
     struct cm_expr *left, *right;
     int type;
@@ -38,6 +40,10 @@ typedef struct cm_expr {
         cm_fun fun;
     };
     int member_count;
+    void *jit_code; // JIT compiled function pointer
+    void *bytecode; // Bytecode for VM execution
+    void *pattern; // Pattern specialization info
+    unsigned char optimization_flags; // Bit flags for optimization status
     struct cm_expr *members[];
 } cm_expr;
 
@@ -53,6 +59,14 @@ typedef struct cm_variable {
     const void *value;
     int type;
 } cm_variable;
+
+// Optimization flags
+#define CM_OPT_NONE          0x00
+#define CM_OPT_PATTERN       0x01  // Pattern specialized
+#define CM_OPT_BYTECODE      0x02  // Bytecode compiled
+#define CM_OPT_JIT           0x04  // JIT compiled
+#define CM_OPT_SIMD          0x08  // SIMD optimized
+#define CM_OPT_CONST_FOLDED  0x10  // Constants folded
 
 // Parses the input expression, evaluates it and frees it
 double cm_interp(const char *expression, int *error);

@@ -1,9 +1,27 @@
+# Build artifacts
 build/
 *.o
 *.a
 *.so
 *.dylib
+*.dSYM/
+
+# Test executables
 example
 benchmark
-*.dSYM/
+jit_test
+native_test
+test_optimization
+test_*
+!test_*.c
+!test_*.h
+
+# System files
 .DS_Store
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

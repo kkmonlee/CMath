@@ -45,10 +45,18 @@ void bench(const char *expr, cm_fun1 func) {
     }
     start = clock();
     d = 0;
+    // Loop unrolling for better performance
     for (j = 0; j < loops; ++j) {
-        for (i = 0; i < loops; ++i) {
-            tmp = i;
-            d += cm_eval(n, NULL);
+        for (i = 0; i < loops; i += 8) {
+            // Unroll 8 iterations at once
+            tmp = i; d += cm_eval(n, NULL);
+            tmp = i+1; d += cm_eval(n, NULL);
+            tmp = i+2; d += cm_eval(n, NULL);
+            tmp = i+3; d += cm_eval(n, NULL);
+            tmp = i+4; d += cm_eval(n, NULL);
+            tmp = i+5; d += cm_eval(n, NULL);
+            tmp = i+6; d += cm_eval(n, NULL);
+            tmp = i+7; d += cm_eval(n, NULL);
         }
     }
 
