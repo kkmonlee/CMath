@@ -44,6 +44,48 @@ cm_expr_pool globalPool = { {0}, 0, PTHREAD_MUTEX_INITIALIZER };
 #define BYTECODE_CHUNK_SIZE 256
 #define MAX_EXPRESSION_DEPTH 64
 #define SIMD_VECTOR_SIZE 4
+#define VECTORIZED_BATCH_SIZE 8
+#define INLINE_CACHE_SIZE 32
+#define EXPRESSION_TEMPLATE_CACHE 64
+
+// Ultra-fast evaluation modes
+typedef enum {
+    EVAL_MODE_STANDARD,
+    EVAL_MODE_VECTORIZED,
+    EVAL_MODE_TEMPLATE_SPECIALIZED,
+    EVAL_MODE_INLINE_CACHED,
+    EVAL_MODE_NATIVE_COMPILED
+} cm_eval_mode;
+
+// Expression templates for ultra-fast evaluation
+typedef struct {
+    cm_eval_mode mode;
+    double (*fast_eval)(const double *vars);
+    void *compiled_code;
+    uint64_t pattern_hash;
+    int hit_count;
+} cm_expression_template;
+
+// Inline cache for variable access
+typedef struct {
+    const double *var_ptr;
+    uint64_t var_hash;
+    double cached_value;
+    int cache_valid;
+} cm_inline_cache;
+
+// Ultra-optimized expression context
+typedef struct {
+    cm_expression_template templates[EXPRESSION_TEMPLATE_CACHE];
+    cm_inline_cache var_cache[INLINE_CACHE_SIZE];
+    double *vectorized_workspace;
+    int template_count;
+    uint64_t evaluation_count;
+} cm_optimization_context;
+
+// Global optimization context
+static cm_optimization_context *globalOptContext = NULL;
+static pthread_mutex_t optContextMutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef enum {
     OP_CONST, OP_VAR, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_POW,
@@ -116,6 +158,17 @@ static double cm_eval_specialized(const cm_expr *expr, const cm_pattern *pattern
 static void cm_flatten_expression(const cm_expr *expr, cm_instruction *instructions, size_t *count);
 static double cm_eval_simd_arm64(const cm_expr *expr, const double *vars);
 static double cm_eval_vectorized(const cm_expr *expr, const double *vars, int vector_size);
+static void cm_specialize_expression(cm_expr *expr);
+static double cm_eval_ultra_optimized(const cm_expr *n);
+static cm_expr *cm_ultra_aggressive_optimize(cm_expr *expr, cm_expr_pool *pool);
+static cm_optimization_context *cm_create_optimization_context(void);
+static void cm_destroy_optimization_context(cm_optimization_context *ctx);
+static double cm_eval_ultra_fast(const cm_expr *expr, cm_optimization_context *ctx, const double *vars);
+static uint64_t cm_hash_expression_pattern(const cm_expr *expr);
+static void cm_generate_native_code(const cm_expr *expr, cm_expression_template *tmpl);
+static double cm_eval_template_specialized(const cm_expr *expr, const cm_pattern *pattern, const double *vars);
+static void cm_vectorized_batch_eval(const cm_expr *expr, const double *input_batch, double *output_batch, int count);
+static double cm_eval_inline_cached(const cm_expr *expr, cm_optimization_context *ctx, const double *vars);
 
 typedef struct state {
     const char *start;
@@ -653,32 +706,70 @@ handle_fun: {
     switch(arity) {
         case 0: return n->fun.f0();
         case 1: {
-            register double operand = cm_eval_computed_goto(n->members[0]);
-            if (n->fun.f1 == sqrt) {
-                return sqrt(operand);
+            register double operand;
+            register cm_expr *child = n->members[0];
+
+            if (__builtin_expect(cm_get_type(child->type) == CM_VAR, 1)) {
+                operand = *child->bound;
+            } else if (__builtin_expect(cm_get_type(child->type) == CM_CONST, 1)) {
+                operand = child->value;
+            } else {
+                operand = cm_eval_computed_goto(child);
             }
-            return n->fun.f1(operand);
+
+            register cm_fun1 func = n->fun.f1;
+            if (__builtin_expect(func == sqrt, 1)) {
+                return sqrt(operand);
+            } else if (__builtin_expect(func == sin, 1)) {
+                return sin(operand);
+            } else if (__builtin_expect(func == cos, 1)) {
+                return cos(operand);
+            } else if (__builtin_expect(func == fabs, 1)) {
+                return fabs(operand);
+            }
+            return func(operand);
         }
         case 2: {
-            register double a = cm_eval_computed_goto(n->members[0]);
-            register double b = cm_eval_computed_goto(n->members[1]);
+            register double a, b;
+            register cm_expr *left = n->members[0];
+            register cm_expr *right = n->members[1];
 
-            if (n->fun.f2 == add) {
+            if (__builtin_expect(cm_get_type(left->type) == CM_VAR, 1)) {
+                a = *left->bound;
+            } else if (__builtin_expect(cm_get_type(left->type) == CM_CONST, 1)) {
+                a = left->value;
+            } else {
+                a = cm_eval_computed_goto(left);
+            }
+
+            if (__builtin_expect(cm_get_type(right->type) == CM_VAR, 1)) {
+                b = *right->bound;
+            } else if (__builtin_expect(cm_get_type(right->type) == CM_CONST, 1)) {
+                b = right->value;
+            } else {
+                b = cm_eval_computed_goto(right);
+            }
+
+            register cm_fun2 func = n->fun.f2;
+            if (__builtin_expect(func == add, 1)) {
                 return a + b;
-            } else if (n->fun.f2 == sub) {
+            } else if (__builtin_expect(func == sub, 1)) {
                 return a - b;
-            } else if (n->fun.f2 == mul) {
+            } else if (__builtin_expect(func == mul, 1)) {
                 return a * b;
-            } else if (n->fun.f2 == divide) {
+            } else if (__builtin_expect(func == divide, 1)) {
                 return a / b;
-            } else if (n->fun.f2 == pow) {
-                if (b == 2.0) return a * a;
-                if (b == 0.5) return sqrt(a);
-                if (b == 1.5) return a * sqrt(a);
-                if (b == 2.5) return a * a * sqrt(a);
+            } else if (__builtin_expect(func == pow, 0)) {
+                if (__builtin_expect(b == 2.0, 1)) return a * a;
+                if (__builtin_expect(b == 0.5, 1)) return sqrt(a);
+                if (__builtin_expect(b == 1.0, 1)) return a;
+                if (__builtin_expect(b == 0.0, 1)) return 1.0;
+                if (__builtin_expect(b == 3.0, 1)) return a * a * a;
+                if (__builtin_expect(b == 1.5, 1)) return a * sqrt(a);
+                if (__builtin_expect(b == 2.5, 1)) return a * a * sqrt(a);
                 return pow(a, b);
             }
-            return n->fun.f2(a, b);
+            return func(a, b);
         }
         default:
             return n->fun.f3(cm_eval_computed_goto(n->members[0]),
@@ -784,6 +875,313 @@ static double cm_eval_vectorized(const cm_expr *expr, const double *vars, int ve
     }
 #endif
     return cm_eval_simd_arm64(expr, vars);
+}
+
+// optimization context management
+static cm_optimization_context *cm_create_optimization_context(void) {
+    cm_optimization_context *ctx = malloc(sizeof(cm_optimization_context));
+    if (!ctx) return NULL;
+
+    memset(ctx, 0, sizeof(cm_optimization_context));
+    // Use aligned allocation if available, otherwise fallback to malloc
+#if defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200112L
+    if (posix_memalign((void**)&ctx->vectorized_workspace, 32, VECTORIZED_BATCH_SIZE * sizeof(double)) != 0) {
+        ctx->vectorized_workspace = malloc(VECTORIZED_BATCH_SIZE * sizeof(double));
+    }
+#else
+    ctx->vectorized_workspace = malloc(VECTORIZED_BATCH_SIZE * sizeof(double));
+#endif
+    ctx->evaluation_count = 0;
+
+    return ctx;
+}
+
+static void cm_destroy_optimization_context(cm_optimization_context *ctx) {
+    if (!ctx) return;
+
+    for (int i = 0; i < ctx->template_count; i++) {
+        if (ctx->templates[i].compiled_code) {
+            free(ctx->templates[i].compiled_code);
+        }
+    }
+
+    if (ctx->vectorized_workspace) {
+        free(ctx->vectorized_workspace);
+    }
+
+    free(ctx);
+}
+
+// cleanup function for optimization context
+void cm_cleanup_global_optimization(void) {
+    pthread_mutex_lock(&optContextMutex);
+    if (globalOptContext) {
+        cm_destroy_optimization_context(globalOptContext);
+        globalOptContext = NULL;
+    }
+    pthread_mutex_unlock(&optContextMutex);
+}
+
+// Lightning-fast expression pattern hashing
+static uint64_t cm_hash_expression_pattern(const cm_expr *expr) {
+    if (!expr) return 0;
+
+    uint64_t hash = 14695981039346656037ULL; // FNV-1a offset basis
+
+    // Hash expression type and structure
+    hash ^= (uint64_t)expr->type;
+    hash *= 1099511628211ULL; // FNV-1a prime
+
+    if (cm_get_type(expr->type) == CM_CONST) {
+        uint64_t value_bits = *(uint64_t*)&expr->value;
+        hash ^= value_bits;
+        hash *= 1099511628211ULL;
+    } else if (cm_get_type(expr->type) == CM_FUN) {
+        hash ^= (uint64_t)(uintptr_t)expr->fun.f2; // Function pointer as hash
+        hash *= 1099511628211ULL;
+
+        // Recursively hash children (limited depth for performance)
+        int arity = cm_get_arity(expr->type);
+        for (int i = 0; i < arity && i < 3; i++) {
+            if (expr->members[i]) {
+                hash ^= cm_hash_expression_pattern(expr->members[i]) >> (i * 8);
+                hash *= 1099511628211ULL;
+            }
+        }
+    }
+
+    return hash;
+}
+
+// Template-based specialized evaluation (inspired by ExprTk)
+static double cm_eval_template_specialized(const cm_expr *expr, const cm_pattern *pattern, const double *vars) {
+    // Ultra-optimized patterns for common mathematical expressions
+    switch (pattern->type) {
+        case PATTERN_CONST:
+            return pattern->coefficients[0];
+
+        case PATTERN_VAR:
+            if (cm_get_type(expr->type) == CM_VAR) {
+                return *expr->bound;
+            }
+            break;
+
+        case PATTERN_POW_CONST:
+            if (cm_get_type(expr->type) == CM_FUN && expr->members[0] &&
+                cm_get_type(expr->members[0]->type) == CM_VAR) {
+                double base = *expr->members[0]->bound;
+                return pow(base, pattern->coefficients[0]);
+            }
+            break;
+
+        case PATTERN_TRIG:
+        case PATTERN_EXP_LOG:
+        case PATTERN_POLYNOMIAL:
+            // These would be implemented for more complex optimizations
+            break;
+
+        case PATTERN_ADD_CONST: {
+            // Direct memory access without tree traversal
+            if (cm_get_type(expr->type) == CM_FUN && expr->members[0] &&
+                cm_get_type(expr->members[0]->type) == CM_VAR) {
+                return *expr->members[0]->bound + pattern->coefficients[0];
+            }
+            break;
+        }
+
+        case PATTERN_MUL_CONST: {
+            if (cm_get_type(expr->type) == CM_FUN && expr->members[0] &&
+                cm_get_type(expr->members[0]->type) == CM_VAR) {
+                return *expr->members[0]->bound * pattern->coefficients[0];
+            }
+            break;
+        }
+
+        case PATTERN_LINEAR: {
+            // ax + b pattern - extremely common
+            if (cm_get_type(expr->type) == CM_FUN && expr->members[0] &&
+                cm_get_type(expr->members[0]->type) == CM_VAR) {
+                return pattern->coefficients[0] * (*expr->members[0]->bound) + pattern->coefficients[1];
+            }
+            break;
+        }
+
+        case PATTERN_QUADRATIC: {
+            // ax^2 + bx + c pattern
+            if (cm_get_type(expr->type) == CM_FUN && expr->members[0] &&
+                cm_get_type(expr->members[0]->type) == CM_VAR) {
+                double x = *expr->members[0]->bound;
+                return pattern->coefficients[0] * x * x + pattern->coefficients[1] * x + pattern->coefficients[2];
+            }
+            break;
+        }
+
+        case PATTERN_UNKNOWN:
+        default:
+            break;
+    }
+
+    return cm_eval_simd_arm64(expr, vars);
+}
+
+// Vectorized batch evaluation for SIMD performance
+static void cm_vectorized_batch_eval(const cm_expr *expr, const double *input_batch, double *output_batch, int count) {
+#if defined(__aarch64__) || defined(__arm64__)
+    // Process in NEON SIMD batches of 2 doubles
+    int simd_count = count & ~1; // Round down to nearest multiple of 2
+
+    for (int i = 0; i < simd_count; i += 2) {
+        float64x2_t inputs = vld1q_f64(&input_batch[i]);
+        float64x2_t results;
+
+        // Simple pattern recognition for vectorization
+        if (cm_get_type(expr->type) == CM_FUN && cm_get_arity(expr->type) == 2) {
+            if (expr->fun.f2 == add && cm_get_type(expr->members[1]->type) == CM_CONST) {
+                // Vectorized a + constant
+                float64x2_t constant = vdupq_n_f64(expr->members[1]->value);
+                results = vaddq_f64(inputs, constant);
+            } else if (expr->fun.f2 == mul && cm_get_type(expr->members[1]->type) == CM_CONST) {
+                // Vectorized a * constant
+                float64x2_t constant = vdupq_n_f64(expr->members[1]->value);
+                results = vmulq_f64(inputs, constant);
+            } else {
+                // Fallback to scalar evaluation
+                output_batch[i] = cm_eval_simd_arm64(expr, &input_batch[i]);
+                output_batch[i+1] = cm_eval_simd_arm64(expr, &input_batch[i+1]);
+                continue;
+            }
+        } else {
+            // Fallback to scalar evaluation
+            output_batch[i] = cm_eval_simd_arm64(expr, &input_batch[i]);
+            output_batch[i+1] = cm_eval_simd_arm64(expr, &input_batch[i+1]);
+            continue;
+        }
+
+        vst1q_f64(&output_batch[i], results);
+    }
+
+    // Handle remaining elements
+    for (int i = simd_count; i < count; i++) {
+        output_batch[i] = cm_eval_simd_arm64(expr, &input_batch[i]);
+    }
+#else
+    // Fallback for non-ARM platforms
+    for (int i = 0; i < count; i++) {
+        output_batch[i] = cm_eval_simd_arm64(expr, &input_batch[i]);
+    }
+#endif
+}
+
+// Inline caching for ultra-fast variable access
+static double cm_eval_inline_cached(const cm_expr *expr, cm_optimization_context *ctx, const double *vars) {
+    if (!ctx || !expr) return 0.0;
+
+    // Check inline cache for variable access
+    if (cm_get_type(expr->type) == CM_VAR) {
+        uint64_t var_hash = (uint64_t)(uintptr_t)expr->bound;
+        int cache_idx = var_hash % INLINE_CACHE_SIZE;
+
+        cm_inline_cache *cache = &ctx->var_cache[cache_idx];
+        if (cache->cache_valid && cache->var_ptr == expr->bound) {
+            return *expr->bound; // Direct cached access
+        } else {
+            // Update cache
+            cache->var_ptr = expr->bound;
+            cache->var_hash = var_hash;
+            cache->cached_value = *expr->bound;
+            cache->cache_valid = 1;
+            return cache->cached_value;
+        }
+    }
+
+    return cm_eval_simd_arm64(expr, vars);
+}
+
+// Native code generation (simplified JIT-like approach)
+static void cm_generate_native_code(const cm_expr *expr, cm_expression_template *tmpl) {
+    if (!expr || !tmpl) return;
+
+    // For now, create specialized function pointers for common patterns
+    uint64_t pattern_hash = cm_hash_expression_pattern(expr);
+
+    // Generate ultra-fast specialized functions for common patterns
+    if (cm_get_type(expr->type) == CM_FUN && cm_get_arity(expr->type) == 2 && expr->fun.f2 == add) {
+        if (cm_get_type(expr->members[0]->type) == CM_VAR && cm_get_type(expr->members[1]->type) == CM_CONST) {
+            // Generate: lambda for x + constant
+            double constant = expr->members[1]->value;
+            tmpl->fast_eval = NULL; // Would implement actual code generation here
+            tmpl->pattern_hash = pattern_hash;
+            tmpl->mode = EVAL_MODE_TEMPLATE_SPECIALIZED;
+        }
+    }
+}
+
+// Ultra-fast evaluation with all optimizations
+static double cm_eval_ultra_fast(const cm_expr *expr, cm_optimization_context *ctx, const double *vars) {
+    if (!expr) return 0.0;
+
+    ctx->evaluation_count++;
+
+    // Check template cache first
+    uint64_t pattern_hash = cm_hash_expression_pattern(expr);
+    for (int i = 0; i < ctx->template_count; i++) {
+        if (ctx->templates[i].pattern_hash == pattern_hash) {
+            ctx->templates[i].hit_count++;
+
+            // Use specialized template if available
+            if (ctx->templates[i].fast_eval) {
+                return ctx->templates[i].fast_eval(vars);
+            }
+            break;
+        }
+    }
+
+    // Try inline cached evaluation
+    if (cm_get_type(expr->type) == CM_VAR) {
+        return cm_eval_inline_cached(expr, ctx, vars);
+    }
+
+    // Create new template if cache has space
+    if (ctx->template_count < EXPRESSION_TEMPLATE_CACHE) {
+        cm_expression_template *tmpl = &ctx->templates[ctx->template_count++];
+        tmpl->pattern_hash = pattern_hash;
+        tmpl->hit_count = 1;
+        cm_generate_native_code(expr, tmpl);
+    }
+
+    // Fallback to optimized SIMD evaluation
+    return cm_eval_simd_arm64(expr, vars);
+}
+
+// ultra-fast expression specialization and inlining
+static void cm_specialize_expression(cm_expr *expr) {
+    if (!expr) return;
+
+    // recursively specialize children first
+    for (int i = 0; i < expr->member_count; i++) {
+        cm_specialize_expression(expr->members[i]);
+    }
+
+    // analyze and cache patterns for this expression
+    if (!expr->pattern) {
+        expr->pattern = malloc(sizeof(cm_pattern));
+        if (expr->pattern) {
+            cm_pattern temp_pattern = cm_analyze_pattern(expr);
+            memcpy(expr->pattern, &temp_pattern, sizeof(cm_pattern));
+            expr->optimization_flags |= CM_OPT_PATTERN;
+
+            // for simple patterns, create ultra-fast inline evaluators
+            if (temp_pattern.type == PATTERN_ADD_CONST ||
+                temp_pattern.type == PATTERN_MUL_CONST ||
+                temp_pattern.type == PATTERN_LINEAR ||
+                temp_pattern.type == PATTERN_POW_CONST) {
+                expr->optimization_flags |= CM_OPT_CONST_FOLDED;
+            }
+        }
+    }
+
+    // mark as specialized
+    expr->optimization_flags |= CM_OPT_SPECIALIZED;
 }
 
 static cm_bytecode *cm_compile_bytecode(const cm_expr *expr, int var_count) {
@@ -1009,15 +1407,30 @@ static cm_pattern cm_analyze_pattern(const cm_expr *expr) {
             int arity = cm_get_arity(expr->type);
 
             if (arity == 2) {
+                // Advanced pattern recognition for maximum performance
                 if (expr->fun.f2 == add) {
-                    if (cm_get_type(expr->members[0]->type) == CM_VAR &&
-                        cm_get_type(expr->members[1]->type) == CM_CONST) {
+                    // Check for ax + b pattern (LINEAR)
+                    cm_expr *left = expr->members[0];
+                    cm_expr *right = expr->members[1];
+
+                    if (cm_get_type(left->type) == CM_FUN && left->fun.f2 == mul &&
+                        cm_get_type(left->members[0]->type) == CM_CONST &&
+                        cm_get_type(left->members[1]->type) == CM_VAR &&
+                        cm_get_type(right->type) == CM_CONST) {
+                        // Pattern: (a * x) + b
+                        pattern.type = PATTERN_LINEAR;
+                        pattern.coefficients[0] = left->members[0]->value;  // a
+                        pattern.coefficients[1] = right->value;              // b
+                    } else if (cm_get_type(left->type) == CM_VAR &&
+                               cm_get_type(right->type) == CM_CONST) {
+                        // Simple pattern: x + constant
                         pattern.type = PATTERN_ADD_CONST;
-                        pattern.coefficients[0] = expr->members[1]->value;
-                    } else if (cm_get_type(expr->members[1]->type) == CM_VAR &&
-                               cm_get_type(expr->members[0]->type) == CM_CONST) {
+                        pattern.coefficients[0] = right->value;
+                    } else if (cm_get_type(right->type) == CM_VAR &&
+                               cm_get_type(left->type) == CM_CONST) {
+                        // Pattern: constant + x
                         pattern.type = PATTERN_ADD_CONST;
-                        pattern.coefficients[0] = expr->members[0]->value;
+                        pattern.coefficients[0] = left->value;
                     }
                 }
                 else if (expr->fun.f2 == mul) {
@@ -1029,6 +1442,15 @@ static cm_pattern cm_analyze_pattern(const cm_expr *expr) {
                                cm_get_type(expr->members[0]->type) == CM_CONST) {
                         pattern.type = PATTERN_MUL_CONST;
                         pattern.coefficients[0] = expr->members[0]->value;
+                    }
+                }
+                else if (expr->fun.f2 == pow) {
+                    // Check for quadratic patterns: x^2
+                    if (cm_get_type(expr->members[0]->type) == CM_VAR &&
+                        cm_get_type(expr->members[1]->type) == CM_CONST &&
+                        expr->members[1]->value == 2.0) {
+                        pattern.type = PATTERN_POW_CONST;
+                        pattern.coefficients[0] = 2.0;
                     }
                 }
             }
@@ -1076,9 +1498,178 @@ static double cm_eval_specialized(const cm_expr *expr, const cm_pattern *pattern
     }
 }
 
+// Extremely fast evaluation using direct inlining and specialization
+static double cm_eval_ultra_optimized(const cm_expr *n) {
+    // Ultra-fast path for most common patterns - no overhead
+    switch(cm_get_type(n->type)) {
+        case CM_CONST:
+            return n->value;
+
+        case CM_VAR:
+            return *n->bound;
+
+        case CM_FUN: {
+            int arity = cm_get_arity(n->type);
+
+            if (arity == 2) {
+                // Hyper-optimized binary operations
+                double a, b;
+
+                // Direct evaluation with minimal overhead
+                if (cm_get_type(n->members[0]->type) == CM_VAR) {
+                    a = *n->members[0]->bound;
+                } else if (cm_get_type(n->members[0]->type) == CM_CONST) {
+                    a = n->members[0]->value;
+                } else {
+                    a = cm_eval_ultra_optimized(n->members[0]);
+                }
+
+                if (cm_get_type(n->members[1]->type) == CM_VAR) {
+                    b = *n->members[1]->bound;
+                } else if (cm_get_type(n->members[1]->type) == CM_CONST) {
+                    b = n->members[1]->value;
+                } else {
+                    b = cm_eval_ultra_optimized(n->members[1]);
+                }
+
+                // Direct arithmetic - no function pointers
+                if (n->fun.f2 == add) {
+                    return a + b;
+                } else if (n->fun.f2 == sub) {
+                    return a - b;
+                } else if (n->fun.f2 == mul) {
+                    return a * b;
+                } else if (n->fun.f2 == divide) {
+                    return a / b;
+                } else if (n->fun.f2 == pow) {
+                    return pow(a, b);
+                } else {
+                    return n->fun.f2(a, b);
+                }
+
+            } else if (arity == 1) {
+                double operand;
+                if (cm_get_type(n->members[0]->type) == CM_VAR) {
+                    operand = *n->members[0]->bound;
+                } else if (cm_get_type(n->members[0]->type) == CM_CONST) {
+                    operand = n->members[0]->value;
+                } else {
+                    operand = cm_eval_ultra_optimized(n->members[0]);
+                }
+
+                // Direct math functions
+                if (n->fun.f1 == sqrt) {
+                    return sqrt(operand);
+                } else if (n->fun.f1 == sin) {
+                    return sin(operand);
+                } else if (n->fun.f1 == cos) {
+                    return cos(operand);
+                } else if (n->fun.f1 == fabs) {
+                    return fabs(operand);
+                } else {
+                    return n->fun.f1(operand);
+                }
+            } else {
+                // Fallback for other arities
+                return n->fun.f0();
+            }
+        }
+    }
+    return 0.0;
+}
+
+// ultra-aggressive evaluation with maximum inlining
+static inline double cm_eval_hyper_optimized(const cm_expr *n) {
+    register int type = cm_get_type(n->type);
+
+    if (__builtin_expect(type == CM_CONST, 1)) {
+        return n->value;
+    }
+
+    if (__builtin_expect(type == CM_VAR, 1)) {
+        return *n->bound;
+    }
+
+    if (__builtin_expect(type == CM_FUN, 1)) {
+        register int arity = cm_get_arity(n->type);
+
+        if (__builtin_expect(arity == 2, 1)) {
+            register double a, b;
+
+            // ultra-fast operand evaluation with branch prediction hints
+            if (__builtin_expect(cm_get_type(n->members[0]->type) == CM_VAR, 1)) {
+                a = *n->members[0]->bound;
+            } else if (__builtin_expect(cm_get_type(n->members[0]->type) == CM_CONST, 1)) {
+                a = n->members[0]->value;
+            } else {
+                a = cm_eval_hyper_optimized(n->members[0]);
+            }
+
+            if (__builtin_expect(cm_get_type(n->members[1]->type) == CM_VAR, 1)) {
+                b = *n->members[1]->bound;
+            } else if (__builtin_expect(cm_get_type(n->members[1]->type) == CM_CONST, 1)) {
+                b = n->members[1]->value;
+            } else {
+                b = cm_eval_hyper_optimized(n->members[1]);
+            }
+
+            // direct function pointer comparison and inlined operations
+            register cm_fun2 func = n->fun.f2;
+            if (__builtin_expect(func == add, 1)) {
+                return a + b;
+            } else if (__builtin_expect(func == mul, 1)) {
+                return a * b;
+            } else if (__builtin_expect(func == sub, 1)) {
+                return a - b;
+            } else if (__builtin_expect(func == divide, 1)) {
+                return a / b;
+            } else if (__builtin_expect(func == pow, 0)) {
+                // optimized pow for common cases
+                if (__builtin_expect(b == 2.0, 1)) return a * a;
+                if (__builtin_expect(b == 0.5, 1)) return sqrt(a);
+                if (__builtin_expect(b == 1.0, 1)) return a;
+                if (__builtin_expect(b == 0.0, 1)) return 1.0;
+                if (__builtin_expect(b == 3.0, 1)) return a * a * a;
+                if (__builtin_expect(b == 1.5, 1)) return a * sqrt(a);
+                if (__builtin_expect(b == 2.5, 1)) return a * a * sqrt(a);
+                return pow(a, b);
+            } else {
+                return func(a, b);
+            }
+        } else if (__builtin_expect(arity == 1, 1)) {
+            register double operand;
+            if (__builtin_expect(cm_get_type(n->members[0]->type) == CM_VAR, 1)) {
+                operand = *n->members[0]->bound;
+            } else if (__builtin_expect(cm_get_type(n->members[0]->type) == CM_CONST, 1)) {
+                operand = n->members[0]->value;
+            } else {
+                operand = cm_eval_hyper_optimized(n->members[0]);
+            }
+
+            register cm_fun1 func = n->fun.f1;
+            if (__builtin_expect(func == sqrt, 1)) {
+                return sqrt(operand);
+            } else if (__builtin_expect(func == sin, 1)) {
+                return sin(operand);
+            } else if (__builtin_expect(func == cos, 1)) {
+                return cos(operand);
+            } else if (__builtin_expect(func == fabs, 1)) {
+                return fabs(operand);
+            } else {
+                return func(operand);
+            }
+        } else if (__builtin_expect(arity == 0, 0)) {
+            return n->fun.f0();
+        }
+    }
+
+    return 0.0;
+}
+
 static double cm_eval_fast(const cm_expr *n) {
 #if defined(__aarch64__) || defined(__arm64__)
-    return cm_eval_simd_arm64(n, NULL);
+    // use hyper-optimized direct evaluation with branch prediction
+    return cm_eval_hyper_optimized(n);
 #elif defined(__GNUC__)
     return cm_eval_computed_goto(n);
 #else
@@ -1219,6 +1810,156 @@ static cm_expr *cm_constant_fold(cm_expr *expr, cm_expr_pool *pool) {
     return expr;
 }
 
+// ultra-aggressive compile-time optimizations
+static cm_expr *cm_ultra_aggressive_optimize(cm_expr *expr, cm_expr_pool *pool) {
+    if (!expr) return NULL;
+
+    // recursively optimize children first
+    for (int i = 0; i < expr->member_count; i++) {
+        expr->members[i] = cm_ultra_aggressive_optimize(expr->members[i], pool);
+    }
+
+    if (cm_get_type(expr->type) == CM_FUN) {
+        int arity = cm_get_arity(expr->type);
+
+        // ultra-aggressive algebraic simplifications
+        if (arity == 2) {
+            cm_expr *left = expr->members[0];
+            cm_expr *right = expr->members[1];
+            int left_const = (cm_get_type(left->type) == CM_CONST);
+            int right_const = (cm_get_type(right->type) == CM_CONST);
+            int left_var = (cm_get_type(left->type) == CM_VAR);
+            int right_var = (cm_get_type(right->type) == CM_VAR);
+
+            if (expr->fun.f2 == add) {
+                // x + 0 = x, 0 + x = x
+                if (left_const && left->value == 0.0) return right;
+                if (right_const && right->value == 0.0) return left;
+
+                // x + x = 2*x
+                if (left_var && right_var && left->bound == right->bound) {
+                    cm_expr *two = new_expr(CM_CONST, NULL, pool);
+                    if (two) {
+                        two->value = 2.0;
+                        cm_expr *result = new_expr(CM_FUN | 2, (const cm_expr *[]){two, left}, pool);
+                        if (result) result->fun.f2 = mul;
+                        return result;
+                    }
+                }
+            }
+            else if (expr->fun.f2 == mul) {
+                // x * 0 = 0, 0 * x = 0
+                if ((left_const && left->value == 0.0) || (right_const && right->value == 0.0)) {
+                    cm_expr *zero = new_expr(CM_CONST, NULL, pool);
+                    if (zero) zero->value = 0.0;
+                    return zero;
+                }
+
+                // x * 1 = x, 1 * x = x
+                if (left_const && left->value == 1.0) return right;
+                if (right_const && right->value == 1.0) return left;
+
+                // x * x = x^2
+                if (left_var && right_var && left->bound == right->bound) {
+                    cm_expr *two = new_expr(CM_CONST, NULL, pool);
+                    if (two) {
+                        two->value = 2.0;
+                        cm_expr *result = new_expr(CM_FUN | 2, (const cm_expr *[]){left, two}, pool);
+                        if (result) result->fun.f2 = pow;
+                        return result;
+                    }
+                }
+
+                // strength reduction: 2*x = x+x (faster on some architectures)
+                if (left_const && left->value == 2.0) {
+                    cm_expr *result = new_expr(CM_FUN | 2, (const cm_expr *[]){right, right}, pool);
+                    if (result) result->fun.f2 = add;
+                    return result;
+                }
+                if (right_const && right->value == 2.0) {
+                    cm_expr *result = new_expr(CM_FUN | 2, (const cm_expr *[]){left, left}, pool);
+                    if (result) result->fun.f2 = add;
+                    return result;
+                }
+            }
+            else if (expr->fun.f2 == pow) {
+                // x^0 = 1
+                if (right_const && right->value == 0.0) {
+                    cm_expr *one = new_expr(CM_CONST, NULL, pool);
+                    if (one) one->value = 1.0;
+                    return one;
+                }
+
+                // x^1 = x
+                if (right_const && right->value == 1.0) return left;
+
+                // 1^x = 1
+                if (left_const && left->value == 1.0) {
+                    cm_expr *one = new_expr(CM_CONST, NULL, pool);
+                    if (one) one->value = 1.0;
+                    return one;
+                }
+
+                // strength reduction for small integer powers
+                if (right_const) {
+                    if (right->value == 2.0) {
+                        // x^2 = x*x (faster than pow)
+                        cm_expr *result = new_expr(CM_FUN | 2, (const cm_expr *[]){left, left}, pool);
+                        if (result) result->fun.f2 = mul;
+                        return result;
+                    }
+                    if (right->value == 0.5) {
+                        // x^0.5 = sqrt(x)
+                        cm_expr *result = new_expr(CM_FUN | 1, (const cm_expr *[]){left}, pool);
+                        if (result) result->fun.f1 = sqrt;
+                        return result;
+                    }
+                }
+            }
+            else if (expr->fun.f2 == sub) {
+                // x - 0 = x
+                if (right_const && right->value == 0.0) return left;
+
+                // x - x = 0
+                if (left_var && right_var && left->bound == right->bound) {
+                    cm_expr *zero = new_expr(CM_CONST, NULL, pool);
+                    if (zero) zero->value = 0.0;
+                    return zero;
+                }
+            }
+            else if (expr->fun.f2 == divide) {
+                // x / 1 = x
+                if (right_const && right->value == 1.0) return left;
+
+                // x / x = 1 (assuming x != 0)
+                if (left_var && right_var && left->bound == right->bound) {
+                    cm_expr *one = new_expr(CM_CONST, NULL, pool);
+                    if (one) one->value = 1.0;
+                    return one;
+                }
+            }
+        }
+        else if (arity == 1) {
+            cm_expr *operand = expr->members[0];
+            int operand_const = (cm_get_type(operand->type) == CM_CONST);
+
+            // mathematical identities
+            if (expr->fun.f1 == sqrt && cm_get_type(operand->type) == CM_FUN) {
+                // sqrt(x^2) = |x|
+                if (cm_get_arity(operand->type) == 2 && operand->fun.f2 == pow &&
+                    cm_get_type(operand->members[1]->type) == CM_CONST &&
+                    operand->members[1]->value == 2.0) {
+                    cm_expr *result = new_expr(CM_FUN | 1, (const cm_expr *[]){operand->members[0]}, pool);
+                    if (result) result->fun.f1 = fabs;
+                    return result;
+                }
+            }
+        }
+    }
+
+    return expr;
+}
+
 // Advanced Mathematical Optimizations
 static cm_expr *cm_apply_math_optimizations(cm_expr *expr, cm_expr_pool *pool) {
     if (!expr) return NULL;
@@ -1330,10 +2071,72 @@ static cm_expr *cm_compile_optimized(const char *expression, const cm_variable *
     return expr;
 }
 
+// ultra-fast direct compiled evaluation for simple patterns
+static inline double cm_eval_direct_compiled(const cm_expr *n) {
+    // check if this is a simple pattern we can evaluate directly
+    if (n && n->pattern) {
+        cm_pattern *pattern = (cm_pattern*)n->pattern;
+        switch (pattern->type) {
+            case PATTERN_CONST:
+                return pattern->coefficients[0];
+
+            case PATTERN_VAR:
+                if (cm_get_type(n->type) == CM_VAR) {
+                    return *n->bound;
+                }
+                break;
+
+            case PATTERN_ADD_CONST:
+                // x + constant - ultra-fast path
+                if (cm_get_type(n->type) == CM_FUN && n->members[0] &&
+                    cm_get_type(n->members[0]->type) == CM_VAR) {
+                    return *n->members[0]->bound + pattern->coefficients[0];
+                }
+                break;
+
+            case PATTERN_MUL_CONST:
+                // x * constant - ultra-fast path
+                if (cm_get_type(n->type) == CM_FUN && n->members[0] &&
+                    cm_get_type(n->members[0]->type) == CM_VAR) {
+                    return *n->members[0]->bound * pattern->coefficients[0];
+                }
+                break;
+
+            case PATTERN_LINEAR:
+                // ax + b - fastest path for linear expressions
+                if (cm_get_type(n->type) == CM_FUN && n->members[0] &&
+                    cm_get_type(n->members[0]->type) == CM_VAR) {
+                    register double x = *n->members[0]->bound;
+                    return pattern->coefficients[0] * x + pattern->coefficients[1];
+                }
+                break;
+
+            case PATTERN_POW_CONST:
+                // x^constant with optimized cases
+                if (cm_get_type(n->type) == CM_FUN && n->members[0] &&
+                    cm_get_type(n->members[0]->type) == CM_VAR) {
+                    register double x = *n->members[0]->bound;
+                    register double exp = pattern->coefficients[0];
+                    if (__builtin_expect(exp == 2.0, 1)) return x * x;
+                    if (__builtin_expect(exp == 0.5, 1)) return sqrt(x);
+                    if (__builtin_expect(exp == 1.5, 1)) return x * sqrt(x);
+                    if (__builtin_expect(exp == 2.5, 1)) return x * x * sqrt(x);
+                    return pow(x, exp);
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    return cm_eval_fast(n);
+}
+
 double cm_eval(const cm_expr *n, int *error) {
-    // Use optimized evaluation paths
+    // use ultra-fast pattern-based evaluation first
     if (!error) {
-        return cm_eval_fast(n);
+        return cm_eval_direct_compiled(n);
     }
 
     switch(cm_get_type(n->type)) {
@@ -1620,10 +2423,10 @@ cm_expr *cm_compile(const char *expression, const cm_variable *variables, int va
     } else {
         optimise(root);
 
-        // Apply all advanced optimizations
+        // apply ultra-aggressive optimizations
         root = cm_constant_fold(root, &globalPool);
-        root = cm_apply_math_optimizations(root, &globalPool);
-        cm_optimize_memory_layout(root);
+        root = cm_ultra_aggressive_optimize(root, &globalPool);
+        cm_specialize_expression(root);
 
         // Set up optimization structures
         if (root) {

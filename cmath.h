@@ -67,6 +67,7 @@ typedef struct cm_variable {
 #define CM_OPT_JIT           0x04  // JIT compiled
 #define CM_OPT_SIMD          0x08  // SIMD optimized
 #define CM_OPT_CONST_FOLDED  0x10  // Constants folded
+#define CM_OPT_SPECIALIZED   0x20  // Expression specialized
 
 // Parses the input expression, evaluates it and frees it
 double cm_interp(const char *expression, int *error);
