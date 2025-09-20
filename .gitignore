@@ -13,7 +13,12 @@ jit_test
 native_test
 test_optimization
 *test*
+!test/
+!test/*.c
 *benchmark*
+
+
+
 
 # System files
 .DS_Store
