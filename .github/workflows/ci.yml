@@ -2,6 +2,7 @@ name: Continuous Integration
 
 on:
   push:
+    # Changed 'main' to 'master' to match your repository
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
@@ -11,34 +12,33 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     
-    # This matrix defines all the different environments to test on.
     strategy:
       fail-fast: false
       matrix:
         include:
+          # FIX: Added -D_USE_MATH_DEFINES to all flags
           - name: "Linux GCC x86-64 (AVX2)"
             os: ubuntu-latest
             compiler: gcc
-            flags: "-O2 -g -Wall -Wextra -lm -lpthread -mavx2 -mfma"
+            flags: "-O2 -g -Wall -Wextra -D_USE_MATH_DEFINES -lm -lpthread -mavx2 -mfma"
 
           - name: "Linux GCC x86-64 (Scalar Fallback)"
             os: ubuntu-latest
             compiler: gcc
-            flags: "-O2 -g -Wall -Wextra -lm -lpthread -D__x86_64__=0"
+            flags: "-O2 -g -Wall -Wextra -D_USE_MATH_DEFINES -lm -lpthread -D__x86_64__=0"
 
           - name: "macOS Clang x86-64"
-            os: macos-13 # x86-64 version of macOS
+            os: macos-13
             compiler: clang
-            flags: "-O2 -g -Wall -Wextra -lm -lpthread -mavx2 -mfma"
+            flags: "-O2 -g -Wall -Wextra -D_USE_MATH_DEFINES -lm -lpthread -mavx2 -mfma"
 
           - name: "Windows MSVC x64"
             os: windows-latest
             compiler: msvc
-            flags: "" # MSVC flags handled in step
+            # FIX: Added /D_USE_MATH_DEFINES for MSVC
+            flags: "/EHsc /O2 /W4 /D_USE_MATH_DEFINES"
 
-    # 'steps' is indented to be a child of 'test'
     steps:
-      # Each '-' starts a new step, indented under 'steps'
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -50,10 +50,9 @@ jobs:
 
       - name: Run Windows MSVC tests
         if: runner.os == 'Windows'
-        # This shell provides access to the cl.exe compiler
-        shell: msvc-developer-command-prompt-x64
+        # FIX: Removed the invalid 'shell:' line. The default shell works.
         run: |
-          cl /EHsc /O2 /W4 /Fe:test_runner.exe test/test_cmath.c
+          cl ${{ matrix.flags }} /Fe:test_runner.exe test/test_cmath.c
           ./test_runner.exe
 
   test-aarch64:
@@ -68,11 +67,10 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Build and test in aarch64 container
-        # This runs a command inside a Docker container that has the aarch64 GCC toolchain.
+        # FIX: Removed the failing apt-get command and added -D_USE_MATH_DEFINES
         run: |
           docker run --rm -v ${{ github.workspace }}:/ws arm64v8/gcc:latest /bin/bash -c " \
             set -e && \
-            apt-get update && apt-get install -y libpthread-stubs0-dev && \
             cd /ws && \
-            gcc -O2 -g -Wall -Wextra -lm -lpthread -o test_runner test/test_cmath.c && \
+            gcc -O2 -g -Wall -Wextra -D_USE_MATH_DEFINES -lm -lpthread -o test_runner test/test_cmath.c && \
             ./test_runner"
