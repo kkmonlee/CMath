@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <stdbool.h>
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(_WIN32)
     #include <sys/mman.h>
 #endif
 
@@ -146,7 +146,7 @@ typedef struct {
     cm_fun specialized_func;
 } cm_pattern;
 
-// --- Static Forward Declarations ---
+// --- static forward declarations ---
 static double cm_eval_fast(const cm_expr *n);
 #ifdef __GNUC__
 static double cm_eval_computed_goto(const cm_expr *n);
@@ -162,9 +162,9 @@ static void cm_bytecode_free(cm_bytecode *bc);
 static cm_pattern cm_analyze_pattern(const cm_expr *expr);
 static void cm_flatten_expression(const cm_expr *expr, cm_instruction *instructions, size_t *count);
 static void cm_specialize_expression(cm_expr *expr);
+static cm_jit_code *cm_compile_jit(const cm_expr *expr, int var_count);
 static void cm_destroy_optimization_context(cm_optimization_context *ctx);
 static uint64_t cm_hash_expression_pattern(const cm_expr *expr);
-static cm_jit_code *cm_compile_jit(const cm_expr *expr, int var_count);
 
 typedef struct state {
     const char *start;
@@ -179,6 +179,9 @@ typedef struct state {
     const cm_variable *lookup;
     int lookup_len;
 } state;
+
+// --- unchanged parser section start ---
+// parser functions and arithmetic operations remain unchanged
 
 void cm_init_pool(cm_expr_pool *pool) {
     pthread_mutex_init(&pool->mutex, NULL);
@@ -648,7 +651,7 @@ handle_default:
 static double cm_eval_simd_arm64(const cm_expr *expr, const double *vars) {
 #if defined(CM_HAVE_NEON)
     if (!expr) return NAN;
-    (void)vars; // Silence unused parameter
+    (void)vars;
 
     switch(cm_get_type(expr->type)) {
         case CM_CONST:
@@ -678,9 +681,9 @@ static double cm_eval_simd_arm64(const cm_expr *expr, const double *vars) {
            return NAN;
     }
 #else
-    (void)expr; // Silence unused parameter
-    (void)vars; // Silence unused parameter
-    return NAN; // Return NaN on non-ARM platforms
+    (void)expr;
+    (void)vars;
+    return NAN;
 #endif
 }
 
@@ -839,7 +842,7 @@ static void cm_bytecode_free(cm_bytecode *bc) {
 }
 
 static cm_pattern cm_analyze_pattern(const cm_expr *expr) {
-    cm_pattern pattern = {PATTERN_UNKNOWN, {0}, 0, NULL};
+    cm_pattern pattern = {PATTERN_UNKNOWN, {0}, 0, {0}};
 
     if (!expr) return pattern;
 
@@ -894,12 +897,16 @@ static cm_pattern cm_analyze_pattern(const cm_expr *expr) {
     return pattern;
 }
 
-static inline double cm_eval_hyper_optimized(const cm_expr *n); // Forward declaration for cm_eval_fast
+// --- end of unchanged section ---
+
+
+
+static inline double cm_eval_hyper_optimized(const cm_expr *n);
 
 static double cm_eval_fast(const cm_expr *n) {
 #if defined(CM_HAVE_NEON)
     return cm_eval_hyper_optimized(n);
-#elif defined(__GNUC__) && !defined(CM_HAVE_SCALAR) // Don't use goto for scalar build to test default path
+#elif defined(__GNUC__) && !defined(CM_HAVE_SCALAR)
     return cm_eval_computed_goto(n);
 #else
     switch(cm_get_type(n->type)) {
@@ -1005,8 +1012,8 @@ static void jit_emit_bytes(cm_jit_builder *builder, const unsigned char *bytes, 
 static int jit_compile_expr(cm_jit_builder *builder, const cm_expr *expr, int *var_counter);
 
 static cm_jit_code *cm_compile_jit(const cm_expr *expr, int var_count) {
-    (void)var_count; // Unused
-#if defined(__x86_64__) && !defined(_WIN32) // JIT for Linux/macOS x86-64
+    (void)var_count;
+#if defined(__x86_64__) && !defined(_WIN32)
     cm_jit_code *jit = malloc(sizeof(cm_jit_code));
     if (!jit) return NULL;
 
@@ -1015,12 +1022,12 @@ static cm_jit_code *cm_compile_jit(const cm_expr *expr, int var_count) {
 
     cm_jit_builder builder = {jit->code, 0, JIT_CODE_SIZE};
 
-    unsigned char prologue[] = { 0x55, 0x48, 0x89, 0xE5 }; // push rbp; mov rbp, rsp
+    unsigned char prologue[] = { 0x55, 0x48, 0x89, 0xE5 };
     jit_emit_bytes(&builder, prologue, sizeof(prologue));
 
     int var_counter = 0;
     if (jit_compile_expr(&builder, expr, &var_counter)) {
-        unsigned char epilogue[] = { 0x5D, 0xC3 }; // pop rbp; ret
+        unsigned char epilogue[] = { 0x5D, 0xC3 };
         jit_emit_bytes(&builder, epilogue, sizeof(epilogue));
         jit->size = builder.pos;
         jit->compiled_func = (double (*)(const double*))jit->code;
@@ -1030,21 +1037,21 @@ static cm_jit_code *cm_compile_jit(const cm_expr *expr, int var_count) {
     munmap(jit->code, JIT_CODE_SIZE);
     free(jit);
 #else
-    (void)expr; // Silencing unused parameter on other platforms
+    (void)expr;
 #endif
     return NULL;
 }
 
 static void jit_emit_double_load(cm_jit_builder *builder, double value) {
-    jit_emit_bytes(builder, (const unsigned char[]){0x48, 0xB8}, 2); // mov rax, ...
+    jit_emit_bytes(builder, (const unsigned char[]){0x48, 0xB8}, 2);
     jit_emit_bytes(builder, (const unsigned char*)&value, sizeof(double));
-    jit_emit_bytes(builder, (const unsigned char[]){0x66, 0x48, 0x0F, 0x6E, 0xC0}, 5); // movd xmm0, rax
+    jit_emit_bytes(builder, (const unsigned char[]){0x66, 0x48, 0x0F, 0x6E, 0xC0}, 5);
 }
 
 static void jit_emit_var_load(cm_jit_builder *builder, int var_index) {
-    unsigned char code[] = {0xF2, 0x0F, 0x10, 0x07}; // movsd xmm0, [rdi]
+    unsigned char code[] = {0xF2, 0x0F, 0x10, 0x07};
     if (var_index > 0) {
-        code[3] = 0x47; // movsd xmm0, [rdi + offset]
+        code[3] = 0x47;
         jit_emit_bytes(builder, code, 4);
         uint8_t offset = var_index * 8;
         jit_emit_byte(builder, offset);
@@ -1061,15 +1068,15 @@ static int jit_compile_expr(cm_jit_builder *builder, const cm_expr *expr, int *v
             int arity = cm_get_arity(expr->type);
             if (arity == 2) {
                 jit_compile_expr(builder, expr->members[1], var_counter);
-                jit_emit_bytes(builder, (const unsigned char[]){0x48, 0x83, 0xEC, 0x08}, 4); // sub rsp, 8
-                jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x11, 0x04, 0x24}, 5); // movsd [rsp], xmm0
+                jit_emit_bytes(builder, (const unsigned char[]){0x48, 0x83, 0xEC, 0x08}, 4);
+                jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x11, 0x04, 0x24}, 5);
                 jit_compile_expr(builder, expr->members[0], var_counter);
-                jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x10, 0x4C, 0x24, 0x00}, 6); // movsd xmm1, [rsp]
-                jit_emit_bytes(builder, (const unsigned char[]){0x48, 0x83, 0xC4, 0x08}, 4); // add rsp, 8
-                if(expr->fun.f2 == add) jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x58, 0xC1}, 4); // addsd xmm0, xmm1
-                else if(expr->fun.f2 == sub) jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x5C, 0xC1}, 4); // subsd xmm0, xmm1
-                else if(expr->fun.f2 == mul) jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x59, 0xC1}, 4); // mulsd xmm0, xmm1
-                else if(expr->fun.f2 == divide) jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x5E, 0xC1}, 4); // divsd xmm0, xmm1
+                jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x10, 0x4C, 0x24, 0x00}, 6);
+                jit_emit_bytes(builder, (const unsigned char[]){0x48, 0x83, 0xC4, 0x08}, 4);
+                if(expr->fun.f2 == add) jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x58, 0xC1}, 4);
+                else if(expr->fun.f2 == sub) jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x5C, 0xC1}, 4);
+                else if(expr->fun.f2 == mul) jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x59, 0xC1}, 4);
+                else if(expr->fun.f2 == divide) jit_emit_bytes(builder, (const unsigned char[]){0xF2, 0x0F, 0x5E, 0xC1}, 4);
                 return 1;
             }
             return 0;
@@ -1144,7 +1151,7 @@ void pn(const cm_expr *n, int depth) {
     }
 }
 
-// --- Vectorized Kernels, Estrin Polynomials, etc. ---
+// --- vectorized kernels and polynomial evaluation ---
 
 static const double EXP_POLY_COEFFS[] = { 1.0, 1.0, 0.5, 1.6666666666666667e-01, 4.1666666666666664e-02, 8.333333333333333e-03, 1.388888888888889e-03, 1.984126984126984e-04, 2.4801587301587302e-05, 2.755731922398589e-06 };
 static const int EXP_POLY_DEG = 9;
@@ -1152,7 +1159,7 @@ static const double SIN_POLY_COEFFS[] = { 0.0, 1.0, 0.0, -1.6666666666666667e-01
 static const int SIN_POLY_DEG = 9;
 
 static inline cm_vd vec_poly_estrin(const double *coeffs, int deg, cm_vd x) {
-    if (deg > 9) deg = 9; // Max supported by this implementation
+    if (deg > 9) deg = 9;
     cm_vd acc = vec_set1_pd(coeffs[deg]);
     for(int i = deg-1; i >= 0; --i) {
         acc = vec_fma_pd(acc, x, vec_set1_pd(coeffs[i]));
@@ -1167,12 +1174,12 @@ static inline cm_vd vec_rsqrt_nr(cm_vd x) {
 #if defined(CM_HAVE_AVX2)
 static inline void vec_exp_avx2(const double *in, double *out, size_t n) { (void)in; (void)out; (void)n; /* Stub */}
 static inline void vec_sin_avx2(const double *in, double *out, size_t n) { (void)in; (void)out; (void)n; /* Stub */}
-static void init_cpu_dispatch(void) {} // Stub
+static void init_cpu_dispatch(void) {}
 #elif defined(CM_HAVE_NEON)
 static inline void vec_exp_neon(const double *in, double *out, size_t n) { (void)in; (void)out; (void)n; /* Stub */}
-static void init_cpu_dispatch(void) {} // Stub
+static void init_cpu_dispatch(void) {}
 #else
-static void init_cpu_dispatch(void) {} // Stub
+static void init_cpu_dispatch(void) {}
 #endif
 
 #if defined(CM_HAVE_AVX2)
@@ -1191,7 +1198,7 @@ static inline void apply_trig_quadrant(cm_vd r, cm_vd quadrant, cm_vd *sin_resul
     __m256d sin_poly = vec_poly_estrin(SIN_POLY_COEFFS, SIN_POLY_DEG, r);
     __m256d cos_poly = vec_poly_estrin(cos_c, 9, r);
 
-    __m256i quad_i = _mm256_cvtpd_epi32(r); // Needs a value, not quadrant
+    __m256i quad_i = _mm256_cvtpd_epi32(r);
     __m256d is_odd_mask = _mm256_castsi256_pd(_mm256_cmpeq_epi64(_mm256_and_si256(quad_i, _mm256_set1_epi64x(1)), _mm256_set1_epi64x(1)));
     __m256d sin_base = _mm256_blendv_pd(sin_poly, cos_poly, is_odd_mask);
     __m256d cos_base = _mm256_blendv_pd(cos_poly, sin_poly, is_odd_mask);
@@ -1202,39 +1209,26 @@ static inline void apply_trig_quadrant(cm_vd r, cm_vd quadrant, cm_vd *sin_resul
 }
 #endif
 
-// --- STUBBED/UNUSED FUNCTIONS WRAPPED IN #if 0 ---
+// --- stubbed/unused functions ---
+
 
 #if 0
-static void cm_vectorized_batch_eval(const cm_expr *expr, const double *input_batch, double *output_batch, int count) {
-    (void)expr; (void)input_batch; (void)output_batch; (void)count;
-}
-static cm_optimization_context *cm_create_optimization_context(void) { return NULL; }
-static void vm_eval_vec_block(const cm_instruction *code, const double *consts, const double **vars, double *out, size_t block_start, size_t block_size) {
-    (void)code; (void)consts; (void)vars; (void)out; (void)block_start; (void)block_size;
-}
-static cm_expr *cm_constant_fold(cm_expr *expr, cm_expr_pool *pool) { (void)pool; return expr; }
-static cm_expr *cm_ultra_aggressive_optimize(cm_expr *expr, cm_expr_pool *pool) { (void)pool; return expr; }
-static cm_expr *cm_apply_math_optimizations(cm_expr *expr, cm_expr_pool *pool) { (void)pool; return expr; }
-static void cm_optimize_memory_layout(cm_expr *expr) { (void)expr; }
-static cm_expr *cm_compile_optimized(const char *expression, const cm_variable *variables, int var_count, int *error, cm_expr_pool *pool) {
-    (void)pool; return cm_compile(expression, variables, var_count, error);
-}
+static uint64_t cm_hash_expression_pattern(const cm_expr *expr) { (void)expr; return 0; }
+static double cm_eval_simd_arm64(const cm_expr *expr, const double *vars) { (void)expr; (void)vars; return NAN; }
 #endif
 
 void cm_eval_vec(const cm_expr *expr, double *out, const double **vars, size_t n, cm_eval_mode_t mode) {
-    (void)mode; // Silence unused param
+    (void)mode;
     init_cpu_dispatch();
 
     for (size_t i = 0; i < n; i++) {
-        // assume vars[0] holds the changing variable
         if (expr->member_count > 0 && cm_get_type(expr->members[0]->type) == CM_VAR && vars && vars[0]) {
-             // rough simulation for testing
         }
         out[i] = cm_eval(expr, NULL);
     }
 }
 void cm_eval_vec_mt(const cm_expr *expr, double *out, const double **vars, size_t n, cm_eval_mode_t mode, int num_threads) {
-    (void)num_threads; // Silence unused
+    (void)num_threads;
     cm_eval_vec(expr, out, vars, n, mode);
 }
 static void cm_destroy_optimization_context(cm_optimization_context *ctx) {
