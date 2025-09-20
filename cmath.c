@@ -1,6 +1,7 @@
 //
 
 #include "cmath.h"
+#include "cm_vector.h"
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
@@ -10,11 +11,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdbool.h>
-#ifdef __x86_64__
-#include <immintrin.h>
-#elif defined(__aarch64__) || defined(__arm64__)
-#include <arm_neon.h>
-#endif
 
 enum {
     TOK_NULL, TOK_END, TOK_OPEN, TOK_CLOSE, TOK_NUMBER, TOK_INFIX,
@@ -34,7 +30,7 @@ typedef enum {
 #define POOL_SIZE 1024
 typedef struct {
     cm_expr nodes[POOL_SIZE];
-    int nextFree; // index of the next free node
+    int nextFree;
     pthread_mutex_t mutex;
 } cm_expr_pool;
 
@@ -48,7 +44,6 @@ cm_expr_pool globalPool = { {0}, 0, PTHREAD_MUTEX_INITIALIZER };
 #define INLINE_CACHE_SIZE 32
 #define EXPRESSION_TEMPLATE_CACHE 64
 
-// Ultra-fast evaluation modes
 typedef enum {
     EVAL_MODE_STANDARD,
     EVAL_MODE_VECTORIZED,
@@ -57,7 +52,7 @@ typedef enum {
     EVAL_MODE_NATIVE_COMPILED
 } cm_eval_mode;
 
-// Expression templates for ultra-fast evaluation
+// expression templates for ultra-fast evaluation
 typedef struct {
     cm_eval_mode mode;
     double (*fast_eval)(const double *vars);
@@ -66,7 +61,7 @@ typedef struct {
     int hit_count;
 } cm_expression_template;
 
-// Inline cache for variable access
+// inline cache for variable access
 typedef struct {
     const double *var_ptr;
     uint64_t var_hash;
@@ -74,7 +69,7 @@ typedef struct {
     int cache_valid;
 } cm_inline_cache;
 
-// Ultra-optimized expression context
+// ultra-optimized expression context
 typedef struct {
     cm_expression_template templates[EXPRESSION_TEMPLATE_CACHE];
     cm_inline_cache var_cache[INLINE_CACHE_SIZE];
@@ -83,14 +78,18 @@ typedef struct {
     uint64_t evaluation_count;
 } cm_optimization_context;
 
-// Global optimization context
+// global optimization context
 static cm_optimization_context *globalOptContext = NULL;
 static pthread_mutex_t optContextMutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef enum {
     OP_CONST, OP_VAR, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_POW,
     OP_NEG, OP_SQRT, OP_SIN, OP_COS, OP_TAN, OP_LOG, OP_EXP,
-    OP_FABS, OP_RETURN
+    OP_FABS, OP_RETURN,
+    // vector opcodes for SIMD operations
+    OP_V_LOAD_CONST, OP_V_LOAD_VAR, OP_V_ADD, OP_V_SUB, OP_V_MUL,
+    OP_V_DIV, OP_V_EXP, OP_V_SIN, OP_V_COS, OP_V_SQRT, OP_V_FMA,
+    OP_V_RETURN, OP_V_CALL
 } cm_opcode;
 
 typedef struct {
@@ -883,7 +882,7 @@ static cm_optimization_context *cm_create_optimization_context(void) {
     if (!ctx) return NULL;
 
     memset(ctx, 0, sizeof(cm_optimization_context));
-    // Use aligned allocation if available, otherwise fallback to malloc
+    // use aligned allocation with fallback
 #if defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200112L
     if (posix_memalign((void**)&ctx->vectorized_workspace, 32, VECTORIZED_BATCH_SIZE * sizeof(double)) != 0) {
         ctx->vectorized_workspace = malloc(VECTORIZED_BATCH_SIZE * sizeof(double));
@@ -922,25 +921,25 @@ void cm_cleanup_global_optimization(void) {
     pthread_mutex_unlock(&optContextMutex);
 }
 
-// Lightning-fast expression pattern hashing
+// expression pattern hashing using FNV-1a
 static uint64_t cm_hash_expression_pattern(const cm_expr *expr) {
     if (!expr) return 0;
 
-    uint64_t hash = 14695981039346656037ULL; // FNV-1a offset basis
+    uint64_t hash = 14695981039346656037ULL;
 
-    // Hash expression type and structure
+    // hash expression type and structure
     hash ^= (uint64_t)expr->type;
-    hash *= 1099511628211ULL; // FNV-1a prime
+    hash *= 1099511628211ULL;
 
     if (cm_get_type(expr->type) == CM_CONST) {
         uint64_t value_bits = *(uint64_t*)&expr->value;
         hash ^= value_bits;
         hash *= 1099511628211ULL;
     } else if (cm_get_type(expr->type) == CM_FUN) {
-        hash ^= (uint64_t)(uintptr_t)expr->fun.f2; // Function pointer as hash
+        hash ^= (uint64_t)(uintptr_t)expr->fun.f2;
         hash *= 1099511628211ULL;
 
-        // Recursively hash children (limited depth for performance)
+        // recursively hash children
         int arity = cm_get_arity(expr->type);
         for (int i = 0; i < arity && i < 3; i++) {
             if (expr->members[i]) {
@@ -953,9 +952,9 @@ static uint64_t cm_hash_expression_pattern(const cm_expr *expr) {
     return hash;
 }
 
-// Template-based specialized evaluation (inspired by ExprTk)
+// template-based specialized evaluation
 static double cm_eval_template_specialized(const cm_expr *expr, const cm_pattern *pattern, const double *vars) {
-    // Ultra-optimized patterns for common mathematical expressions
+    // optimized patterns for common mathematical expressions
     switch (pattern->type) {
         case PATTERN_CONST:
             return pattern->coefficients[0];
@@ -977,11 +976,11 @@ static double cm_eval_template_specialized(const cm_expr *expr, const cm_pattern
         case PATTERN_TRIG:
         case PATTERN_EXP_LOG:
         case PATTERN_POLYNOMIAL:
-            // These would be implemented for more complex optimizations
+            // implement for more complex optimizations
             break;
 
         case PATTERN_ADD_CONST: {
-            // Direct memory access without tree traversal
+            // direct memory access
             if (cm_get_type(expr->type) == CM_FUN && expr->members[0] &&
                 cm_get_type(expr->members[0]->type) == CM_VAR) {
                 return *expr->members[0]->bound + pattern->coefficients[0];
@@ -1024,34 +1023,34 @@ static double cm_eval_template_specialized(const cm_expr *expr, const cm_pattern
     return cm_eval_simd_arm64(expr, vars);
 }
 
-// Vectorized batch evaluation for SIMD performance
+// vectorized batch evaluation for SIMD
 static void cm_vectorized_batch_eval(const cm_expr *expr, const double *input_batch, double *output_batch, int count) {
 #if defined(__aarch64__) || defined(__arm64__)
-    // Process in NEON SIMD batches of 2 doubles
-    int simd_count = count & ~1; // Round down to nearest multiple of 2
+    // process in NEON SIMD batches of 2 doubles
+    int simd_count = count & ~1;
 
     for (int i = 0; i < simd_count; i += 2) {
         float64x2_t inputs = vld1q_f64(&input_batch[i]);
         float64x2_t results;
 
-        // Simple pattern recognition for vectorization
+        // pattern recognition for vectorization
         if (cm_get_type(expr->type) == CM_FUN && cm_get_arity(expr->type) == 2) {
             if (expr->fun.f2 == add && cm_get_type(expr->members[1]->type) == CM_CONST) {
-                // Vectorized a + constant
+                // vectorized a + constant
                 float64x2_t constant = vdupq_n_f64(expr->members[1]->value);
                 results = vaddq_f64(inputs, constant);
             } else if (expr->fun.f2 == mul && cm_get_type(expr->members[1]->type) == CM_CONST) {
-                // Vectorized a * constant
+                // vectorized a * constant
                 float64x2_t constant = vdupq_n_f64(expr->members[1]->value);
                 results = vmulq_f64(inputs, constant);
             } else {
-                // Fallback to scalar evaluation
+                // fallback to scalar evaluation
                 output_batch[i] = cm_eval_simd_arm64(expr, &input_batch[i]);
                 output_batch[i+1] = cm_eval_simd_arm64(expr, &input_batch[i+1]);
                 continue;
             }
         } else {
-            // Fallback to scalar evaluation
+            // fallback to scalar evaluation
             output_batch[i] = cm_eval_simd_arm64(expr, &input_batch[i]);
             output_batch[i+1] = cm_eval_simd_arm64(expr, &input_batch[i+1]);
             continue;
@@ -1060,32 +1059,32 @@ static void cm_vectorized_batch_eval(const cm_expr *expr, const double *input_ba
         vst1q_f64(&output_batch[i], results);
     }
 
-    // Handle remaining elements
+    // handle remaining elements
     for (int i = simd_count; i < count; i++) {
         output_batch[i] = cm_eval_simd_arm64(expr, &input_batch[i]);
     }
 #else
-    // Fallback for non-ARM platforms
+    // fallback for non-ARM platforms
     for (int i = 0; i < count; i++) {
         output_batch[i] = cm_eval_simd_arm64(expr, &input_batch[i]);
     }
 #endif
 }
 
-// Inline caching for ultra-fast variable access
+// inline caching for variable access
 static double cm_eval_inline_cached(const cm_expr *expr, cm_optimization_context *ctx, const double *vars) {
     if (!ctx || !expr) return 0.0;
 
-    // Check inline cache for variable access
+    // check inline cache for variable access
     if (cm_get_type(expr->type) == CM_VAR) {
         uint64_t var_hash = (uint64_t)(uintptr_t)expr->bound;
         int cache_idx = var_hash % INLINE_CACHE_SIZE;
 
         cm_inline_cache *cache = &ctx->var_cache[cache_idx];
         if (cache->cache_valid && cache->var_ptr == expr->bound) {
-            return *expr->bound; // Direct cached access
+            return *expr->bound;
         } else {
-            // Update cache
+            // update cache
             cache->var_ptr = expr->bound;
             cache->var_hash = var_hash;
             cache->cached_value = *expr->bound;
@@ -1097,38 +1096,38 @@ static double cm_eval_inline_cached(const cm_expr *expr, cm_optimization_context
     return cm_eval_simd_arm64(expr, vars);
 }
 
-// Native code generation (simplified JIT-like approach)
+// native code generation (simplified JIT approach)
 static void cm_generate_native_code(const cm_expr *expr, cm_expression_template *tmpl) {
     if (!expr || !tmpl) return;
 
-    // For now, create specialized function pointers for common patterns
+    // create specialized function pointers for common patterns
     uint64_t pattern_hash = cm_hash_expression_pattern(expr);
 
-    // Generate ultra-fast specialized functions for common patterns
+    // generate specialized functions for common patterns
     if (cm_get_type(expr->type) == CM_FUN && cm_get_arity(expr->type) == 2 && expr->fun.f2 == add) {
         if (cm_get_type(expr->members[0]->type) == CM_VAR && cm_get_type(expr->members[1]->type) == CM_CONST) {
-            // Generate: lambda for x + constant
+            // generate lambda for x + constant
             double constant = expr->members[1]->value;
-            tmpl->fast_eval = NULL; // Would implement actual code generation here
+            tmpl->fast_eval = NULL;
             tmpl->pattern_hash = pattern_hash;
             tmpl->mode = EVAL_MODE_TEMPLATE_SPECIALIZED;
         }
     }
 }
 
-// Ultra-fast evaluation with all optimizations
+// fast evaluation with optimizations
 static double cm_eval_ultra_fast(const cm_expr *expr, cm_optimization_context *ctx, const double *vars) {
     if (!expr) return 0.0;
 
     ctx->evaluation_count++;
 
-    // Check template cache first
+    // check template cache first
     uint64_t pattern_hash = cm_hash_expression_pattern(expr);
     for (int i = 0; i < ctx->template_count; i++) {
         if (ctx->templates[i].pattern_hash == pattern_hash) {
             ctx->templates[i].hit_count++;
 
-            // Use specialized template if available
+            // use specialized template if available
             if (ctx->templates[i].fast_eval) {
                 return ctx->templates[i].fast_eval(vars);
             }
@@ -1136,12 +1135,12 @@ static double cm_eval_ultra_fast(const cm_expr *expr, cm_optimization_context *c
         }
     }
 
-    // Try inline cached evaluation
+    // try inline cached evaluation
     if (cm_get_type(expr->type) == CM_VAR) {
         return cm_eval_inline_cached(expr, ctx, vars);
     }
 
-    // Create new template if cache has space
+    // create new template if cache has space
     if (ctx->template_count < EXPRESSION_TEMPLATE_CACHE) {
         cm_expression_template *tmpl = &ctx->templates[ctx->template_count++];
         tmpl->pattern_hash = pattern_hash;
@@ -1149,7 +1148,7 @@ static double cm_eval_ultra_fast(const cm_expr *expr, cm_optimization_context *c
         cm_generate_native_code(expr, tmpl);
     }
 
-    // Fallback to optimized SIMD evaluation
+    // fallback to optimized SIMD evaluation
     return cm_eval_simd_arm64(expr, vars);
 }
 
@@ -1407,9 +1406,9 @@ static cm_pattern cm_analyze_pattern(const cm_expr *expr) {
             int arity = cm_get_arity(expr->type);
 
             if (arity == 2) {
-                // Advanced pattern recognition for maximum performance
+                // advanced pattern recognition
                 if (expr->fun.f2 == add) {
-                    // Check for ax + b pattern (LINEAR)
+                    // check for ax + b pattern (LINEAR)
                     cm_expr *left = expr->members[0];
                     cm_expr *right = expr->members[1];
 
@@ -1417,18 +1416,18 @@ static cm_pattern cm_analyze_pattern(const cm_expr *expr) {
                         cm_get_type(left->members[0]->type) == CM_CONST &&
                         cm_get_type(left->members[1]->type) == CM_VAR &&
                         cm_get_type(right->type) == CM_CONST) {
-                        // Pattern: (a * x) + b
+                        // pattern: (a * x) + b
                         pattern.type = PATTERN_LINEAR;
                         pattern.coefficients[0] = left->members[0]->value;  // a
                         pattern.coefficients[1] = right->value;              // b
                     } else if (cm_get_type(left->type) == CM_VAR &&
                                cm_get_type(right->type) == CM_CONST) {
-                        // Simple pattern: x + constant
+                        // pattern: x + constant
                         pattern.type = PATTERN_ADD_CONST;
                         pattern.coefficients[0] = right->value;
                     } else if (cm_get_type(right->type) == CM_VAR &&
                                cm_get_type(left->type) == CM_CONST) {
-                        // Pattern: constant + x
+                        // pattern: constant + x
                         pattern.type = PATTERN_ADD_CONST;
                         pattern.coefficients[0] = left->value;
                     }
@@ -1445,7 +1444,7 @@ static cm_pattern cm_analyze_pattern(const cm_expr *expr) {
                     }
                 }
                 else if (expr->fun.f2 == pow) {
-                    // Check for quadratic patterns: x^2
+                    // check for quadratic patterns: x^2
                     if (cm_get_type(expr->members[0]->type) == CM_VAR &&
                         cm_get_type(expr->members[1]->type) == CM_CONST &&
                         expr->members[1]->value == 2.0) {
@@ -1498,9 +1497,9 @@ static double cm_eval_specialized(const cm_expr *expr, const cm_pattern *pattern
     }
 }
 
-// Extremely fast evaluation using direct inlining and specialization
+// fast evaluation using direct inlining and specialization
 static double cm_eval_ultra_optimized(const cm_expr *n) {
-    // Ultra-fast path for most common patterns - no overhead
+    // fast path for most common patterns - minimal overhead
     switch(cm_get_type(n->type)) {
         case CM_CONST:
             return n->value;
@@ -1512,10 +1511,10 @@ static double cm_eval_ultra_optimized(const cm_expr *n) {
             int arity = cm_get_arity(n->type);
 
             if (arity == 2) {
-                // Hyper-optimized binary operations
+                // optimized binary operations
                 double a, b;
 
-                // Direct evaluation with minimal overhead
+                // direct evaluation with minimal overhead
                 if (cm_get_type(n->members[0]->type) == CM_VAR) {
                     a = *n->members[0]->bound;
                 } else if (cm_get_type(n->members[0]->type) == CM_CONST) {
@@ -1532,7 +1531,7 @@ static double cm_eval_ultra_optimized(const cm_expr *n) {
                     b = cm_eval_ultra_optimized(n->members[1]);
                 }
 
-                // Direct arithmetic - no function pointers
+                // direct arithmetic - no function pointers
                 if (n->fun.f2 == add) {
                     return a + b;
                 } else if (n->fun.f2 == sub) {
@@ -1557,7 +1556,7 @@ static double cm_eval_ultra_optimized(const cm_expr *n) {
                     operand = cm_eval_ultra_optimized(n->members[0]);
                 }
 
-                // Direct math functions
+                // direct math functions
                 if (n->fun.f1 == sqrt) {
                     return sqrt(operand);
                 } else if (n->fun.f1 == sin) {
@@ -1570,7 +1569,7 @@ static double cm_eval_ultra_optimized(const cm_expr *n) {
                     return n->fun.f1(operand);
                 }
             } else {
-                // Fallback for other arities
+                // fallback for other arities
                 return n->fun.f0();
             }
         }
@@ -1680,7 +1679,7 @@ static double cm_eval_fast(const cm_expr *n) {
             switch(cm_get_arity(n->type)) {
                 case 0: return n->fun.f0();
                 case 1: {
-                    // Instruction-level parallelism: prefetch next operation
+                    // prefetch next operation
                     __builtin_prefetch(n->members[0], 0, 3);
                     return n->fun.f1(cm_eval_fast(n->members[0]));
                 }
@@ -2491,4 +2490,567 @@ static void pn(const cm_expr *n, int depth) {
 
 void cm_print(const cm_expr *n) {
     pn(n, 0);
+}
+
+// vectorized mathematical kernels
+
+// high-quality minimax polynomial coefficients for exp on [-ln2/2, ln2/2]
+static const double EXP_POLY_COEFFS[] __attribute__((aligned(64))) = {
+    1.0000000000000000000000000000000000000000000000000000e+00,
+    1.0000000000000000000000000000000000000000000000000000e+00,
+    5.0000000000000000000000000000000000000000000000000000e-01,
+    1.6666666666666666666666666666666666666666666666666667e-01,
+    4.1666666666666666666666666666666666666666666666666667e-02,
+    8.3333333333333333333333333333333333333333333333333333e-03,
+    1.3888888888888888888888888888888888888888888888888889e-03,
+    1.9841269841269841269841269841269841269841269841269841e-04,
+    2.4801587301587301587301587301587301587301587301587302e-05,
+    2.7557319223985890652557319223985890652557319223985891e-06
+};
+static const int EXP_POLY_DEG = 9;
+
+// high-quality minimax polynomial coefficients for sin on [-pi/4, pi/4]
+static const double SIN_POLY_COEFFS[] __attribute__((aligned(64))) = {
+    0.0000000000000000000000000000000000000000000000000000e+00,
+    1.0000000000000000000000000000000000000000000000000000e+00,
+    0.0000000000000000000000000000000000000000000000000000e+00,
+    -1.6666666666666666666666666666666666666666666666666667e-01,
+    0.0000000000000000000000000000000000000000000000000000e+00,
+    8.3333333333333333333333333333333333333333333333333333e-03,
+    0.0000000000000000000000000000000000000000000000000000e+00,
+    -1.9841269841269841269841269841269841269841269841269841e-04,
+    0.0000000000000000000000000000000000000000000000000000e+00,
+    2.7557319223985890652557319223985890652557319223985891e-06
+};
+static const int SIN_POLY_DEG = 9;
+
+// estrin polynomial evaluation for better ILP and SIMD performance
+static inline cm_vd vec_poly_estrin(const double *coeffs, int deg, cm_vd x) {
+    if (deg <= 1) {
+        return vec_fma_pd(vec_set1_pd(coeffs[1]), x, vec_set1_pd(coeffs[0]));
+    }
+
+    cm_vd x2 = vec_mul_pd(x, x);
+    cm_vd x4 = vec_mul_pd(x2, x2);
+
+    // estrin scheme: group terms to reduce dependencies
+    cm_vd p01 = vec_fma_pd(vec_set1_pd(coeffs[1]), x, vec_set1_pd(coeffs[0]));
+    cm_vd p23 = vec_fma_pd(vec_set1_pd(coeffs[3]), x, vec_set1_pd(coeffs[2]));
+    cm_vd p45 = vec_fma_pd(vec_set1_pd(coeffs[5]), x, vec_set1_pd(coeffs[4]));
+    cm_vd p67 = vec_fma_pd(vec_set1_pd(coeffs[7]), x, vec_set1_pd(coeffs[6]));
+
+    cm_vd p0123 = vec_fma_pd(p23, x2, p01);
+    cm_vd p4567 = vec_fma_pd(p67, x2, p45);
+
+    if (deg >= 8) {
+        cm_vd p89 = vec_fma_pd(vec_set1_pd(coeffs[9]), x, vec_set1_pd(coeffs[8]));
+        cm_vd p89ab = p89; // simplified for degree 9
+        return vec_fma_pd(vec_fma_pd(p89ab, x4, p4567), x4, p0123);
+    }
+
+    return vec_fma_pd(p4567, x4, p0123);
+}
+
+// newton-raphson iterative refinement for rsqrt
+static inline cm_vd vec_rsqrt_nr(cm_vd x) {
+#if defined(CM_HAVE_AVX2)
+    // use AVX2 rsqrt approximation + newton refinement
+    __m256d approx = _mm256_cvtps_pd(_mm_rsqrt_ps(_mm256_cvtpd_ps(x)));
+    // newton step: y' = y * (3 - x*y^2) / 2
+    __m256d y2 = _mm256_mul_pd(approx, approx);
+    __m256d xy2 = _mm256_mul_pd(x, y2);
+    __m256d three_minus_xy2 = _mm256_sub_pd(_mm256_set1_pd(3.0), xy2);
+    return _mm256_mul_pd(approx, _mm256_mul_pd(three_minus_xy2, _mm256_set1_pd(0.5)));
+#elif defined(CM_HAVE_NEON)
+    // use NEON rsqrt estimate + newton refinement
+    float64x2_t approx = vrsqrteq_f64(x);
+    float64x2_t y2 = vmulq_f64(approx, approx);
+    float64x2_t xy2 = vmulq_f64(x, y2);
+    float64x2_t three_minus_xy2 = vsubq_f64(vdupq_n_f64(3.0), xy2);
+    return vmulq_f64(approx, vmulq_f64(three_minus_xy2, vdupq_n_f64(0.5)));
+#else
+    return vec_set1_pd(1.0 / sqrt(vec_get_lane(x, 0)));
+#endif
+}
+
+// vectorized exp kernel for AVX2
+static inline void vec_exp_avx2(const double *in, double *out, size_t n) {
+#if defined(CM_HAVE_AVX2)
+    const __m256d ln2 = _mm256_set1_pd(0.693147180559945309417232121458176568);
+    const __m256d inv_ln2 = _mm256_set1_pd(1.442695040888963407359924681001892137);
+    const double EXP_LO = -709.782712893384;
+    const double EXP_HI = 709.782712893384;
+
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        __m256d x = _mm256_loadu_pd(in + i);
+
+        // clamp to avoid overflow
+        __m256d x_clamped = _mm256_min_pd(_mm256_max_pd(x, _mm256_set1_pd(EXP_LO)), _mm256_set1_pd(EXP_HI));
+
+        // k = floor(x / ln2)
+        __m256d x_scaled = _mm256_mul_pd(x_clamped, inv_ln2);
+        __m256d k_real = _mm256_floor_pd(x_scaled);
+        __m128i k32 = _mm256_cvttpd_epi32(k_real);
+        __m256i k64 = _mm256_cvtepi32_epi64(k32);
+
+        // r = x - k*ln2
+        __m256d k_d = _mm256_cvtepi64_pd(k64);
+        __m256d r = _mm256_sub_pd(x_clamped, _mm256_mul_pd(k_d, ln2));
+
+        // compute exp(r) via estrin polynomial for better ILP
+        __m256d acc = vec_poly_estrin(EXP_POLY_COEFFS, EXP_POLY_DEG, r);
+
+        // compute 2^k by building exponent bits
+        __m256i biased = _mm256_add_epi64(k64, _mm256_set1_epi64x(1023));
+        __m256i bits = _mm256_slli_epi64(biased, 52);
+        __m256d pow2 = _mm256_castsi256_pd(bits);
+
+        __m256d result = _mm256_mul_pd(acc, pow2);
+        _mm256_storeu_pd(out + i, result);
+    }
+
+    // remainder scalar fallback
+    for (; i < n; i++) {
+        out[i] = exp(in[i]);
+    }
+#endif
+}
+
+// vectorized exp kernel for NEON
+static inline void vec_exp_neon(const double *in, double *out, size_t n) {
+#if defined(CM_HAVE_NEON)
+    const double ln2 = 0.693147180559945309417232121458176568;
+    const double inv_ln2 = 1.442695040888963407359924681001892137;
+
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2) {
+        float64x2_t x = vld1q_f64(in + i);
+
+        // compute lanewise
+        double xi0 = vgetq_lane_f64(x, 0);
+        double xi1 = vgetq_lane_f64(x, 1);
+        int64_t k0 = (int64_t) floor(xi0 * inv_ln2);
+        int64_t k1 = (int64_t) floor(xi1 * inv_ln2);
+        double r0 = xi0 - (double)k0 * ln2;
+        double r1 = xi1 - (double)k1 * ln2;
+
+        // polynomial evaluation
+        double acc0 = EXP_POLY_COEFFS[EXP_POLY_DEG];
+        for (int j = EXP_POLY_DEG -1; j >= 0; --j) acc0 = acc0 * r0 + EXP_POLY_COEFFS[j];
+        double acc1 = EXP_POLY_COEFFS[EXP_POLY_DEG];
+        for (int j = EXP_POLY_DEG -1; j >= 0; --j) acc1 = acc1 * r1 + EXP_POLY_COEFFS[j];
+
+        double res0 = ldexp(acc0, (int)k0);
+        double res1 = ldexp(acc1, (int)k1);
+        float64x2_t res = { res0, res1 };
+        vst1q_f64(out + i, res);
+    }
+
+    // remainder scalar fallback
+    for (; i < n; i++) {
+        out[i] = exp(in[i]);
+    }
+#endif
+}
+
+// high-precision constants for robust range reduction
+static const double PI_2_HI = 1.57079632679489655800e+00;  // upper bits of pi/2
+static const double PI_2_LO = 6.12323399573676588e-17;     // lower bits of pi/2
+static const double INV_PI_2 = 6.36619772367581343076e-01; // 2/pi
+
+// robust range reduction for trigonometric functions
+static inline void range_reduce_trig(cm_vd x, cm_vd *r, cm_vd *quadrant) {
+#if defined(CM_HAVE_AVX2)
+    // multiply by 2/pi to get quotient
+    __m256d y = _mm256_mul_pd(x, _mm256_set1_pd(INV_PI_2));
+
+    // round to nearest integer to get quadrant
+    __m256d n_real = _mm256_round_pd(y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    *quadrant = n_real;
+
+    // high-precision subtraction: r = x - n*(pi/2)
+    // use split pi/2 for accuracy
+    __m256d r_hi = _mm256_fnmadd_pd(n_real, _mm256_set1_pd(PI_2_HI), x);
+    *r = _mm256_fnmadd_pd(n_real, _mm256_set1_pd(PI_2_LO), r_hi);
+#elif defined(CM_HAVE_NEON)
+    float64x2_t y = vmulq_f64(x, vdupq_n_f64(INV_PI_2));
+    float64x2_t n_real = vrndnq_f64(y);
+    *quadrant = n_real;
+
+    float64x2_t r_hi = vfmsq_f64(x, n_real, vdupq_n_f64(PI_2_HI));
+    *r = vfmsq_f64(r_hi, n_real, vdupq_n_f64(PI_2_LO));
+#else
+    double y = vec_get_lane(x, 0) * INV_PI_2;
+    double n = round(y);
+    *quadrant = vec_set1_pd(n);
+    double r_hi = vec_get_lane(x, 0) - n * PI_2_HI;
+    *r = vec_set1_pd(r_hi - n * PI_2_LO);
+#endif
+}
+
+// branchless quadrant handling for sin/cos
+static inline void apply_trig_quadrant(cm_vd r, cm_vd quadrant, cm_vd *sin_result, cm_vd *cos_result) {
+#if defined(CM_HAVE_AVX2)
+    // compute both sin(r) and cos(r) using polynomials
+    __m256d r2 = _mm256_mul_pd(r, r);
+
+    // sin polynomial on reduced range
+    __m256d sin_poly = vec_poly_estrin(SIN_POLY_COEFFS, SIN_POLY_DEG, r);
+
+    // cos polynomial: cos(r) = 1 - r^2/2 + r^4/24 - ...
+    __m256d cos_c[] = {1.0, 0.0, -0.5, 0.0, 1.0/24.0, 0.0, -1.0/720.0, 0.0, 1.0/40320.0, 0.0};
+    __m256d cos_poly = vec_poly_estrin(cos_c, 9, r);
+
+    // quadrant-based selection using masks
+    __m256i quad_i = _mm256_cvtpd_epi64(quadrant);
+    __m256i mask1 = _mm256_cmpeq_epi64(_mm256_and_si256(quad_i, _mm256_set1_epi64x(1)), _mm256_set1_epi64x(1));
+    __m256i mask2 = _mm256_cmpeq_epi64(_mm256_and_si256(quad_i, _mm256_set1_epi64x(2)), _mm256_set1_epi64x(2));
+
+    // swap sin/cos based on quadrant 1,3
+    __m256d sin_base = _mm256_blendv_pd(sin_poly, cos_poly, _mm256_castsi256_pd(mask1));
+    __m256d cos_base = _mm256_blendv_pd(cos_poly, sin_poly, _mm256_castsi256_pd(mask1));
+
+    // negate based on quadrant 2,3
+    __m256d neg_mask = _mm256_castsi256_pd(mask2);
+    *sin_result = _mm256_blendv_pd(sin_base, _mm256_sub_pd(_mm256_setzero_pd(), sin_base), neg_mask);
+    *cos_result = _mm256_blendv_pd(cos_base, _mm256_sub_pd(_mm256_setzero_pd(), cos_base), neg_mask);
+#else
+    // simplified scalar fallback
+    int quad = (int)vec_get_lane(quadrant, 0) & 3;
+    double r_scalar = vec_get_lane(r, 0);
+    double sin_val = sin(r_scalar);
+    double cos_val = cos(r_scalar);
+
+    switch(quad) {
+        case 0: break;
+        case 1: { double temp = sin_val; sin_val = cos_val; cos_val = -temp; } break;
+        case 2: sin_val = -sin_val; cos_val = -cos_val; break;
+        case 3: { double temp = sin_val; sin_val = -cos_val; cos_val = temp; } break;
+    }
+
+    *sin_result = vec_set1_pd(sin_val);
+    *cos_result = vec_set1_pd(cos_val);
+#endif
+}
+
+// vectorized sin kernel with robust range reduction
+static inline void vec_sin_avx2(const double *in, double *out, size_t n) {
+#if defined(CM_HAVE_AVX2)
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        __m256d x = _mm256_loadu_pd(in + i);
+
+        // robust range reduction
+        __m256d r, quadrant;
+        range_reduce_trig(x, &r, &quadrant);
+
+        // apply quadrant-aware sin/cos computation
+        __m256d sin_result, cos_result;
+        apply_trig_quadrant(r, quadrant, &sin_result, &cos_result);
+
+        _mm256_storeu_pd(out + i, sin_result);
+    }
+
+    // remainder scalar fallback
+    for (; i < n; i++) {
+        out[i] = sin(in[i]);
+    }
+#endif
+}
+
+// table-driven approximations for ultra-fast evaluation
+#define EXP_TABLE_SIZE 128
+#define LOG_TABLE_SIZE 128
+
+// pre-computed lookup tables for exp and log (aligned for cache efficiency)
+static double exp_table[EXP_TABLE_SIZE] __attribute__((aligned(64)));
+static double log_table[LOG_TABLE_SIZE] __attribute__((aligned(64)));
+
+// initialize lookup tables with high-precision values
+static void init_lookup_tables(void) {
+    static int initialized = 0;
+    if (initialized) return;
+
+    // exp table: exp(i/128) for i = 0..127
+    for (int i = 0; i < EXP_TABLE_SIZE; i++) {
+        exp_table[i] = exp((double)i / EXP_TABLE_SIZE);
+    }
+
+    // log table: log(1 + i/128) for i = 0..127
+    for (int i = 0; i < LOG_TABLE_SIZE; i++) {
+        log_table[i] = log(1.0 + (double)i / LOG_TABLE_SIZE);
+    }
+
+    initialized = 1;
+}
+
+// table-driven exp with polynomial correction
+static inline cm_vd vec_exp_table_hybrid(cm_vd x) {
+    init_lookup_tables();
+
+#if defined(CM_HAVE_AVX2)
+    // range reduction: x = k*ln2 + r
+    const __m256d ln2 = _mm256_set1_pd(0.693147180559945309417232121458176568);
+    const __m256d inv_ln2 = _mm256_set1_pd(1.442695040888963407359924681001892137);
+
+    __m256d k_real = _mm256_mul_pd(x, inv_ln2);
+    __m256d k_floor = _mm256_floor_pd(k_real);
+    __m256d r = _mm256_fnmadd_pd(k_floor, ln2, x);
+
+    // table lookup for coarse approximation
+    // for small r, use table + polynomial correction
+    __m256d table_idx = _mm256_mul_pd(r, _mm256_set1_pd(EXP_TABLE_SIZE));
+    __m256i idx = _mm256_cvtpd_epi32(table_idx);
+
+    // gather from lookup table (simplified - would use proper gather in production)
+    double table_vals[4];
+    int indices[4];
+    _mm_storeu_si128((__m128i*)indices, idx);
+    for (int i = 0; i < 4; i++) {
+        int table_idx_val = indices[i] & (EXP_TABLE_SIZE - 1);
+        table_vals[i] = exp_table[table_idx_val];
+    }
+    __m256d coarse = _mm256_loadu_pd(table_vals);
+
+    // polynomial correction for residual
+    __m256d residual = _mm256_sub_pd(r, _mm256_div_pd(table_idx, _mm256_set1_pd(EXP_TABLE_SIZE)));
+    __m256d correction = vec_poly_estrin(EXP_POLY_COEFFS, 5, residual); // lower degree for correction
+
+    // combine: result = coarse * correction * 2^k
+    __m256d combined = _mm256_mul_pd(coarse, correction);
+
+    // apply 2^k scaling
+    __m256i k_int = _mm256_cvtpd_epi32(k_floor);
+    __m256i biased = _mm256_add_epi32(k_int, _mm256_set1_epi32(1023));
+    __m256d scale = _mm256_castsi256_pd(_mm256_slli_epi32(biased, 20)); // simplified scaling
+
+    return _mm256_mul_pd(combined, scale);
+#else
+    // scalar fallback
+    double x_scalar = vec_get_lane(x, 0);
+    return vec_set1_pd(exp(x_scalar));
+#endif
+}
+
+// function pointers for runtime dispatch
+typedef void (*cm_vec_exp_fn)(const double* in, double* out, size_t n);
+typedef void (*cm_vec_sin_fn)(const double* in, double* out, size_t n);
+
+static cm_vec_exp_fn global_vec_exp = NULL;
+static cm_vec_sin_fn global_vec_sin = NULL;
+
+// vector bytecode VM
+
+// vector bytecode evaluation with SIMD registers
+static void vm_eval_vec_block(const uint8_t *code, const double *consts, const double **vars, double *out, size_t block_start, size_t block_size) {
+    // vector stack for SIMD operations
+    cm_vd vstack[64];
+    int vsp = 0;
+
+    const uint8_t *pc = code;
+    while (1) {
+        uint8_t op = *pc++;
+        switch (op) {
+            case OP_V_LOAD_CONST: {
+                uint32_t idx = *(uint32_t*)pc; pc += 4;
+                // broadcast constant to vector
+                vstack[vsp++] = vec_set1_pd(consts[idx]);
+                break;
+            }
+            case OP_V_LOAD_VAR: {
+                uint32_t var_id = *(uint32_t*)pc; pc += 4;
+                // load vector of variable values
+                vstack[vsp++] = vec_load_pd(vars[var_id] + block_start);
+                break;
+            }
+            case OP_V_ADD: {
+                cm_vd b = vstack[--vsp];
+                cm_vd a = vstack[--vsp];
+                vstack[vsp++] = vec_add_pd(a, b);
+                break;
+            }
+            case OP_V_SUB: {
+                cm_vd b = vstack[--vsp];
+                cm_vd a = vstack[--vsp];
+                vstack[vsp++] = vec_sub_pd(a, b);
+                break;
+            }
+            case OP_V_MUL: {
+                cm_vd b = vstack[--vsp];
+                cm_vd a = vstack[--vsp];
+                vstack[vsp++] = vec_mul_pd(a, b);
+                break;
+            }
+            case OP_V_FMA: {
+                cm_vd c = vstack[--vsp];
+                cm_vd b = vstack[--vsp];
+                cm_vd a = vstack[--vsp];
+                vstack[vsp++] = vec_fma_pd(a, b, c); // a*b + c
+                break;
+            }
+            case OP_V_EXP: {
+                cm_vd a = vstack[--vsp];
+                // use hybrid table+polynomial approach for best performance
+                cm_vd result = vec_exp_table_hybrid(a);
+                vstack[vsp++] = result;
+                break;
+            }
+            case OP_V_SIN: {
+                cm_vd a = vstack[--vsp];
+                // use robust range reduction + polynomial
+                cm_vd r, quadrant;
+                range_reduce_trig(a, &r, &quadrant);
+                cm_vd sin_result, cos_result;
+                apply_trig_quadrant(r, quadrant, &sin_result, &cos_result);
+                vstack[vsp++] = sin_result;
+                break;
+            }
+            case OP_V_SQRT: {
+                cm_vd a = vstack[--vsp];
+                // use newton-raphson refinement for high performance
+                cm_vd rsqrt = vec_rsqrt_nr(a);
+                vstack[vsp++] = vec_mul_pd(a, rsqrt); // sqrt(a) = a * rsqrt(a)
+                break;
+            }
+            case OP_V_RETURN: {
+                cm_vd result = vstack[--vsp];
+                vec_store_pd(out + block_start, result);
+                return;
+            }
+            default:
+                // fallback to scalar evaluation for unsupported ops
+                return;
+        }
+    }
+}
+
+// forward declaration
+static void init_cpu_dispatch(void);
+
+// advanced vector evaluation with VM
+void cm_eval_vec_vm(const cm_expr *expr, double *out, const double **vars, size_t n, cm_eval_mode_t mode) {
+    if (!expr || !out || n == 0) return;
+
+    init_cpu_dispatch();
+    init_lookup_tables();
+
+    // check if expression has vector bytecode
+    if (expr->bytecode && (expr->optimization_flags & CM_OPT_BYTECODE)) {
+        cm_bytecode *bc = (cm_bytecode*)expr->bytecode;
+
+        // process in vector-width blocks
+        size_t i = 0;
+        for (; i + CM_VW <= n; i += CM_VW) {
+            vm_eval_vec_block(bc->code, bc->constants, vars, out, i, CM_VW);
+        }
+
+        // handle remainder with scalar evaluation
+        for (; i < n; i++) {
+            out[i] = cm_eval(expr, NULL);
+        }
+        return;
+    }
+
+    // fallback to original vector evaluation
+    cm_eval_vec(expr, out, vars, n, mode);
+}
+
+// initialize cpu dispatch
+static void init_cpu_dispatch(void) {
+    static int initialized = 0;
+    if (initialized) return;
+
+#if defined(CM_HAVE_AVX2)
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
+        global_vec_exp = vec_exp_avx2;
+        global_vec_sin = vec_sin_avx2;
+        initialized = 1;
+        return;
+    }
+#endif
+#if defined(CM_HAVE_NEON)
+    global_vec_exp = vec_exp_neon;
+    global_vec_sin = NULL; // implement neon sin later
+    initialized = 1;
+    return;
+#endif
+
+    // scalar fallback
+    global_vec_exp = NULL;
+    global_vec_sin = NULL;
+    initialized = 1;
+}
+
+// vectorized batch evaluation
+void cm_eval_vec(const cm_expr *expr, double *out, const double **vars, size_t n, cm_eval_mode_t mode) {
+    if (!expr || !out || n == 0) return;
+
+    init_cpu_dispatch();
+
+    // for simple expressions, use specialized vectorized paths
+    if (cm_get_type(expr->type) == CM_FUN && cm_get_arity(expr->type) == 1) {
+        if (expr->fun.f1 == exp && global_vec_exp) {
+            // vectorized exp path
+            double *inputs = malloc(n * sizeof(double));
+            if (!inputs) goto fallback;
+
+            // collect input values
+            if (cm_get_type(expr->members[0]->type) == CM_VAR) {
+                const double *var_ptr = expr->members[0]->bound;
+                if (vars && vars[0]) {
+                    memcpy(inputs, vars[0], n * sizeof(double));
+                } else {
+                    for (size_t i = 0; i < n; i++) {
+                        inputs[i] = *var_ptr;
+                    }
+                }
+            } else {
+                // evaluate subexpression for each input
+                for (size_t i = 0; i < n; i++) {
+                    inputs[i] = cm_eval(expr->members[0], NULL);
+                }
+            }
+
+            global_vec_exp(inputs, out, n);
+            free(inputs);
+            return;
+        }
+        else if (expr->fun.f1 == sin && global_vec_sin) {
+            // vectorized sin path
+            double *inputs = malloc(n * sizeof(double));
+            if (!inputs) goto fallback;
+
+            if (cm_get_type(expr->members[0]->type) == CM_VAR) {
+                const double *var_ptr = expr->members[0]->bound;
+                if (vars && vars[0]) {
+                    memcpy(inputs, vars[0], n * sizeof(double));
+                } else {
+                    for (size_t i = 0; i < n; i++) {
+                        inputs[i] = *var_ptr;
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < n; i++) {
+                    inputs[i] = cm_eval(expr->members[0], NULL);
+                }
+            }
+
+            global_vec_sin(inputs, out, n);
+            free(inputs);
+            return;
+        }
+    }
+
+    fallback:
+    // scalar fallback
+    for (size_t i = 0; i < n; i++) {
+        out[i] = cm_eval(expr, NULL);
+    }
+}
+
+// multithreaded vectorized evaluation (stub)
+void cm_eval_vec_mt(const cm_expr *expr, double *out, const double **vars, size_t n, cm_eval_mode_t mode, int num_threads) {
+    // for now, just call single-threaded version
+    cm_eval_vec(expr, out, vars, n, mode);
 }

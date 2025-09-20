@@ -12,9 +12,8 @@ benchmark
 jit_test
 native_test
 test_optimization
-test_*
-!test_*.c
-!test_*.h
+*test*
+*benchmark*
 
 # System files
 .DS_Store

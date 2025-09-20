@@ -5,6 +5,8 @@
 #ifndef __CMATH_H__
 #define __CMATH_H__
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -60,28 +62,41 @@ typedef struct cm_variable {
     int type;
 } cm_variable;
 
-// Optimization flags
+// optimization flags
 #define CM_OPT_NONE          0x00
-#define CM_OPT_PATTERN       0x01  // Pattern specialized
-#define CM_OPT_BYTECODE      0x02  // Bytecode compiled
-#define CM_OPT_JIT           0x04  // JIT compiled
-#define CM_OPT_SIMD          0x08  // SIMD optimized
-#define CM_OPT_CONST_FOLDED  0x10  // Constants folded
-#define CM_OPT_SPECIALIZED   0x20  // Expression specialized
+#define CM_OPT_PATTERN       0x01
+#define CM_OPT_BYTECODE      0x02
+#define CM_OPT_JIT           0x04
+#define CM_OPT_SIMD          0x08
+#define CM_OPT_CONST_FOLDED  0x10
+#define CM_OPT_SPECIALIZED   0x20
 
-// Parses the input expression, evaluates it and frees it
+// evaluation modes for accuracy vs performance trade-offs
+typedef enum {
+    CM_MODE_FAST = 1,
+    CM_MODE_BALANCED = 2,
+    CM_MODE_CORRECT = 4
+} cm_eval_mode_t;
+
+// parses the input expression, evaluates it and frees it
 double cm_interp(const char *expression, int *error);
 
-// Parses the input expression and binds variables
+// parses the input expression and binds variables
 cm_expr *cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error);
 
-// Evaluate the expression
+// evaluate the expression
 double cm_eval(const cm_expr *n, int *error);
 
-// Prints debugging information
+// vectorized batch evaluation
+void cm_eval_vec(const cm_expr *expr, double *out, const double **vars, size_t n, cm_eval_mode_t mode);
+
+// multithreaded vectorized evaluation
+void cm_eval_vec_mt(const cm_expr *expr, double *out, const double **vars, size_t n, cm_eval_mode_t mode, int num_threads);
+
+// prints debugging information
 void cm_print(const cm_expr *n);
 
-// Frees expression
+// frees expression
 void cm_free(cm_expr *n);
 
 #ifdef __cplusplus
