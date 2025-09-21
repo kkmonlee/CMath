@@ -7,7 +7,8 @@ on:
     branches: [ "master" ]
 
 jobs:
-  test:
+  # Job for Linux and macOS
+  test-unix:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     
@@ -30,36 +31,35 @@ jobs:
             compiler: clang
             flags: "-O2 -g -Wall -Wextra -D_USE_MATH_DEFINES -lm -lpthread -mavx2 -mfma"
 
-          - name: "Windows MSVC x64"
-            os: windows-latest
-            compiler: msvc
-            flags: "/EHsc /O2 /W4 /D_USE_MATH_DEFINES"
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # FIX: Added this step to correctly set up the MSVC environment on Windows
-      - name: Setup MSVC developer command prompt
-        if: runner.os == 'Windows'
-        uses: microsoft/setup-msvc-dev-cmd@v1
-
-      - name: Run Linux/macOS tests
-        if: runner.os == 'Linux' || runner.os == 'macOS'
+      - name: Run tests
         run: |
           ${{ matrix.compiler }} ${{ matrix.flags }} -o test_runner test/test_cmath.c
           ./test_runner
 
+  # FIX: Dedicated job for Windows to isolate its setup steps
+  test-windows:
+    name: "Windows MSVC x64"
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC developer command prompt
+        uses: microsoft/setup-msvc-dev-cmd@v1
+      
       - name: Run Windows MSVC tests
-        if: runner.os == 'Windows'
         run: |
-          cl ${{ matrix.flags }} /Fe:test_runner.exe test/test_cmath.c
+          cl /EHsc /O2 /W4 /D_USE_MATH_DEFINES /Fe:test_runner.exe test/test_cmath.c
           ./test_runner.exe
 
+  # Job for AArch64
   test-aarch64:
     name: "Linux GCC AArch64 (NEON)"
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -68,7 +68,6 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Build and test in aarch64 container
-        # FIX: Added --platform to force pull of arm64 image
         run: |
           docker run --platform linux/arm64 --rm -v ${{ github.workspace }}:/ws arm64v8/gcc:latest /bin/bash -c " \
             set -e && \
