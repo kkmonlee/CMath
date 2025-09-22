@@ -223,7 +223,7 @@ cm_expr *cm_pool_alloc(cm_expr_pool *pool, int member_count) {
 
     if (pool->nextFree + member_count + 1 <= POOL_SIZE) {
         cm_expr *ret = &pool->nodes[pool->nextFree];
-        pool->nextFree += 1;
+        pool->nextFree += member_count + 1;
         ret->member_count = member_count;
         pthread_mutex_unlock(&pool->mutex);
         return ret;
@@ -233,7 +233,7 @@ cm_expr *cm_pool_alloc(cm_expr_pool *pool, int member_count) {
 
     if (pool->nextFree + member_count + 1 <= POOL_SIZE) {
         cm_expr *ret = &pool->nodes[pool->nextFree];
-        pool->nextFree += 1;
+        pool->nextFree += member_count + 1;
         ret->member_count = member_count;
         pthread_mutex_unlock(&pool->mutex);
         return ret;
@@ -291,6 +291,9 @@ void cm_free(cm_expr *n) {
         free(n->pattern);
         n->pattern = NULL;
     }
+
+    // mark node as free for pool compaction
+    n->member_count = -1;
 }
 
 static const double pi = 3.14159265358979323846;
@@ -309,7 +312,8 @@ static const cm_variable functions[] = {
         {"exp", exp,      CM_FUN | 1},
         {"floor", floor,  CM_FUN | 1},
         {"ln", log,       CM_FUN | 1},
-        {"log", log10,    CM_FUN | 1},
+        {"log", log,      CM_FUN | 1},
+        {"log10", log10,  CM_FUN | 1},
         {"pi", &pi,       CM_VAR},
         {"pow", pow,      CM_FUN | 2},
         {"sin", sin,      CM_FUN | 1},
@@ -465,9 +469,9 @@ static cm_expr *base(state *s, int *error) {
 
         case TOK_FUNCTION1:
             ret = new_expr(CM_FUN | 1, 0, &globalPool);
-            ret->members[0] = power(s, error);
             ret->fun.f0 = s->fun.f0;
             next_token(s);
+            ret->members[0] = power(s, error);
             break;
 
         case TOK_FUNCTION2: case TOK_FUNCTION3: case TOK_FUNCTION4:
@@ -1153,11 +1157,6 @@ void pn(const cm_expr *n, int depth) {
 
 // --- vectorized kernels and polynomial evaluation ---
 
-static const double EXP_POLY_COEFFS[] = { 1.0, 1.0, 0.5, 1.6666666666666667e-01, 4.1666666666666664e-02, 8.333333333333333e-03, 1.388888888888889e-03, 1.984126984126984e-04, 2.4801587301587302e-05, 2.755731922398589e-06 };
-static const int EXP_POLY_DEG = 9;
-static const double SIN_POLY_COEFFS[] = { 0.0, 1.0, 0.0, -1.6666666666666667e-01, 0.0, 8.333333333333333e-03, 0.0, -1.984126984126984e-04, 0.0, 2.755731922398589e-06 };
-static const int SIN_POLY_DEG = 9;
-
 static inline cm_vd vec_poly_estrin(const double *coeffs, int deg, cm_vd x) {
     if (deg > 9) deg = 9;
     cm_vd acc = vec_set1_pd(coeffs[deg]);
@@ -1171,16 +1170,69 @@ static inline cm_vd vec_rsqrt_nr(cm_vd x) {
     double val = vec_get_lane(x, 0);
     return vec_set1_pd(1.0 / sqrt(val));
 }
+// global function pointers for cpu dispatch
+cm_backend_ops cm_ops = {0};
+static int dispatch_initialized = 0;
+
 #if defined(CM_HAVE_AVX2)
-static inline void vec_exp_avx2(const double *in, double *out, size_t n) { (void)in; (void)out; (void)n; /* Stub */}
-static inline void vec_sin_avx2(const double *in, double *out, size_t n) { (void)in; (void)out; (void)n; /* Stub */}
-static void init_cpu_dispatch(void) {}
+static inline void vec_exp_avx2(const double *in, double *out, size_t n) {
+    vec_exp_kernel(in, out, n);
+}
+static inline void vec_sin_avx2(const double *in, double *out, size_t n) {
+    vec_sin_kernel(in, out, n);
+}
+static inline void vec_sqrt_avx2(const double *in, double *out, size_t n) {
+    vec_sqrt_kernel(in, out, n);
+}
+static void init_cpu_dispatch(void) {
+    if (dispatch_initialized) return;
+    cm_ops.vec_exp = vec_exp_avx2;
+    cm_ops.vec_sin = vec_sin_avx2;
+    cm_ops.vec_sqrt = vec_sqrt_avx2;
+    cm_ops.vec_cos = vec_sin_avx2; // placeholder
+    dispatch_initialized = 1;
+}
 #elif defined(CM_HAVE_NEON)
-static inline void vec_exp_neon(const double *in, double *out, size_t n) { (void)in; (void)out; (void)n; /* Stub */}
-static void init_cpu_dispatch(void) {}
+static inline void vec_exp_neon(const double *in, double *out, size_t n) {
+    vec_exp_kernel(in, out, n);
+}
+static inline void vec_sin_neon(const double *in, double *out, size_t n) {
+    vec_sin_kernel(in, out, n);
+}
+static inline void vec_sqrt_neon(const double *in, double *out, size_t n) {
+    vec_sqrt_kernel(in, out, n);
+}
+static void init_cpu_dispatch(void) {
+    if (dispatch_initialized) return;
+    cm_ops.vec_exp = vec_exp_neon;
+    cm_ops.vec_sin = vec_sin_neon;
+    cm_ops.vec_sqrt = vec_sqrt_neon;
+    cm_ops.vec_cos = vec_sin_neon; // placeholder
+    dispatch_initialized = 1;
+}
 #else
-static void init_cpu_dispatch(void) {}
+static void vec_exp_scalar(const double *in, double *out, size_t n) {
+    for (size_t i = 0; i < n; i++) out[i] = exp(in[i]);
+}
+static void vec_sin_scalar(const double *in, double *out, size_t n) {
+    for (size_t i = 0; i < n; i++) out[i] = sin(in[i]);
+}
+static void vec_sqrt_scalar(const double *in, double *out, size_t n) {
+    for (size_t i = 0; i < n; i++) out[i] = sqrt(in[i]);
+}
+static void init_cpu_dispatch(void) {
+    if (dispatch_initialized) return;
+    cm_ops.vec_exp = vec_exp_scalar;
+    cm_ops.vec_sin = vec_sin_scalar;
+    cm_ops.vec_sqrt = vec_sqrt_scalar;
+    cm_ops.vec_cos = vec_sin_scalar; // placeholder
+    dispatch_initialized = 1;
+}
 #endif
+
+void cm_init_cpu_dispatch(void) {
+    init_cpu_dispatch();
+}
 
 #if defined(CM_HAVE_AVX2)
 static const double PI_2_HI = 1.5707963267948966;
@@ -1218,12 +1270,67 @@ static double cm_eval_simd_arm64(const cm_expr *expr, const double *vars) { (voi
 #endif
 
 void cm_eval_vec(const cm_expr *expr, double *out, const double **vars, size_t n, cm_eval_mode_t mode) {
-    (void)mode;
+    if (!expr || !out || n == 0) return;
+
     init_cpu_dispatch();
 
-    for (size_t i = 0; i < n; i++) {
-        if (expr->member_count > 0 && cm_get_type(expr->members[0]->type) == CM_VAR && vars && vars[0]) {
+    // for simple expressions with single variable, try vectorized path
+    if (expr->member_count == 1 && cm_get_type(expr->type) == CM_FUN) {
+        // check if it's a simple function we can vectorize
+        if (expr->fun.f1 == exp && vars && vars[0]) {
+            cm_ops.vec_exp(vars[0], out, n);
+            return;
+        } else if (expr->fun.f1 == sin && vars && vars[0]) {
+            cm_ops.vec_sin(vars[0], out, n);
+            return;
+        } else if (expr->fun.f1 == sqrt && vars && vars[0]) {
+            cm_ops.vec_sqrt(vars[0], out, n);
+            return;
         }
+    }
+
+    // try pattern-based vectorization for simple expressions
+    if (expr->pattern && expr->optimization_flags & CM_OPT_PATTERN) {
+        cm_pattern *pat = (cm_pattern*)expr->pattern;
+        if (pat->type == PATTERN_LINEAR && vars && vars[0]) {
+            // vectorized linear: a*x + b
+            double a = pat->coefficients[0];
+            double b = pat->coefficients[1];
+            size_t i = 0;
+            for (; i + CM_VW <= n; i += CM_VW) {
+                cm_vd x = vec_load_pd(vars[0] + i);
+                cm_vd result = vec_fma_pd(vec_set1_pd(a), x, vec_set1_pd(b));
+                vec_store_pd(out + i, result);
+            }
+            // scalar fallback
+            for (; i < n; i++) {
+                out[i] = a * vars[0][i] + b;
+            }
+            return;
+        } else if (pat->type == PATTERN_QUADRATIC && vars && vars[0]) {
+            // vectorized quadratic: a*x^2 + b*x + c
+            double a = pat->coefficients[0];
+            double b = pat->coefficients[1];
+            double c = pat->coefficients[2];
+            size_t i = 0;
+            for (; i + CM_VW <= n; i += CM_VW) {
+                cm_vd x = vec_load_pd(vars[0] + i);
+                cm_vd x2 = vec_mul_pd(x, x);
+                cm_vd result = vec_fma_pd(vec_set1_pd(a), x2,
+                               vec_fma_pd(vec_set1_pd(b), x, vec_set1_pd(c)));
+                vec_store_pd(out + i, result);
+            }
+            // scalar fallback
+            for (; i < n; i++) {
+                double x = vars[0][i];
+                out[i] = a * x * x + b * x + c;
+            }
+            return;
+        }
+    }
+
+    // fallback to scalar evaluation
+    for (size_t i = 0; i < n; i++) {
         out[i] = cm_eval(expr, NULL);
     }
 }
