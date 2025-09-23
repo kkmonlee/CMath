@@ -1,202 +1,179 @@
 # CMath
-CMath is an extremely small recursive top-down (descent) parser and a mathematical evaluation engine.
+CMath is a tiny recursive‑descent parser and mathematical evaluation engine with two execution modes:
+- A zero‑dependency ANSI C interpreter.
+- An optional LLVM‑based JIT that compiles expressions to optimized machine code, with scalar and batch (SoA) kernels.
 
-It gives you the ability to evaluate mathematical expressions at runtime without adding more code to your project. Additionally, CMath also supports the standard C mathematical functions and runtime binding of variables.
+Use it to evaluate mathematical expressions at runtime and bind variables without generating code by hand. The interpreter works anywhere a C compiler runs. The JIT is optional and currently targets Apple Silicon (aarch64) first.
 
 ## Features
+- Interpreter
+    - ANSI C, single C file + header, no external dependencies
+    - Standard operator precedence and common math functions
+    - Thread‑safe (assuming your allocator is)
+- Optional LLVM JIT (accelerator)
+    - Scalar and batch (SoA) kernels
+    - Front‑end IR + optimizer (constant folding, CSE, DCE, peepholes)
+    - FMA fusion, sqrt(x*x) -> fabs(x) rewrite, integer power lowering
+    - Vectorization‑friendly loops with LLVM loop metadata
+    - Alias/readonly/writeonly parameter attributes
+    - Tunables: unroll/interleave/vector‑width hints, prefetch distance, alignment assumptions
+    - Optional nontemporal stores for streaming outputs
+    - Opaque‑pointer ready (LLVM 17+)
+- Deterministic numerics: JIT, interpreter, and native agree within FP roundoff; see benchmark accuracy checks.
 
-- **ANSI C** with no dependencies
-- Single source and header file
-- Efficient and simple
-- Implements [standard operator precedence](http://en.cppreference.com/w/c/language/operator_precedence)
-- Uses standard C mathematical functions (`sin`, `sqrt`, `atan`, etc.)
-- Ability to bind variables at program evaluation
-- Released under GNU GPL v3 license
-- Thread-safe, assuming your **`malloc`** is
+## Example (interpreter)
+    #include "cmath.h"
+    printf("%f\n", cm_interp("5*5", 0)); /* Prints 25 */
 
-## Example
-```c
-#include "cmath.h"
+## Interpreter API
+CMath defines these functions (no LLVM required):
 
-printf("%f\n", cm_interp("5*5", 0)); /* Prints 25 */
-```
+    double  cm_interp(const char *expression, int *error);
+    cm_expr* cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error);
+    double  cm_eval(const cm_expr *expr);
+    void     cm_free(cm_expr *expr);
 
-## Usage
-CMath only defines 4 functions:
+- cm_interp: parse + evaluate in one call (returns NaN on parse error; optionally sets error position).
+- cm_compile/cm_eval/cm_free: compile once, evaluate many times with current variable bindings.
 
-```c
-double cm_interp(const char *expression, int *error);
+Quick example with variables:
 
-cm_expr *cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error);
+    double x=3, y=4;
+    cm_variable vars[] = {{"x",&x}, {"y",&y}};
+    int err = 0;
+    cm_expr* e = cm_compile("sqrt(x^2+y^2)", vars, 2, &err);
+    if (e) {
+      printf("%f\n", cm_eval(e));  // 5.0
+      cm_free(e);
+    }
 
-double cm_eval(const cm_expr *expr);
+## Optional LLVM JIT API (accelerator)
+Include `cmath_jit_llvm.h` when building with LLVM available:
 
-void cm_free(cm_expr *expr);
-```
+    // Capability
+    int cm_llvm_jit_supported(void);
 
-### `cm_interp`
-`cm_interp()` takes an expression and immediately returns the result of it. If there is a format or parsing error, `cm_interp()` returns `NaN`.
+    // Scalar JIT
+    typedef double (*cm_jit_fn)(const double* vars);
+    int cm_llvm_jit_compile(const cm_instr* code, size_t n_insts,
+                            size_t num_vars, size_t num_slots, uint32_t result_slot,
+                            cm_jit_fn* out_fn, void** out_state);
 
-If the `error` pointer argument is not 0, then `cm_interp()` will set `*error` to the position of the parse error on failure, and set `*error` to 0 on success.
+    // Batch JIT (SoA)
+    typedef void (*cm_jit_fn_batch)(const double* const* inputs, size_t n, double* out);
+    int cm_llvm_jit_compile_batch(const cm_instr* code, size_t n_insts,
+                                  size_t num_vars, size_t num_slots, uint32_t result_slot,
+                                  cm_jit_fn_batch* out_fn, void** out_state);
 
-#### Usage
-```c
-int error;
+    // Tunables (optional)
+    typedef struct cm_jit_options {
+      int opt_level;               // 0..3 (default 3)
+      int enable_const_fold;       // default 1
+      int enable_cse;              // default 1
+      int enable_dce;              // default 1
+      int enable_auto_fma;         // default 1
+      int powi_limit;              // default 8
+      int vec_width_hint;          // 0=auto (default 0)
+      int interleave_hint;         // default 2
+      int unroll_hint;             // default 4
+      int alignment;               // assumed input/out alignment bytes (default 16)
+      int prefetch_distance;       // 0 disables (default 64)
+      int block_size;              // strip mine size (default 0=off)
+      int assume_noalias;          // add noalias/readonly/writeonly (default 1)
+      int nontemporal_store;       // mark out[i] as nontemporal (default 0)
+    } cm_jit_options;
 
-double a = cm_interp("(5+5)", 0); /* Returns 10. */
-double b = cm_interp("(5+5)", &error); /* Returns 10, error is set to 0. */
-double c = cm_interp("(5+5", &error); /* Returns NaN, error is set to 4. */
-```
+    int cm_llvm_jit_compile_ex(..., const cm_jit_options* opts, ...);
+    int cm_llvm_jit_compile_batch_ex(..., const cm_jit_options* opts, ...);
 
-### `cm_compile`, `cm_eval`, `cm_free`
-```c
-cm_expr *cm_compile(const char *expression, const cm_variable *lookup, int lookup_len, int *error);
-double cm_eval(const cm_expr *n);
-void cm_free(cm_expr *n);
-```
+    // Release JIT state
+    void cm_llvm_jit_release(void* state);
 
-`cm_compile()` must be given an expression with unbound variables and a list of variable names and pointers. It will then return a `cm_expr*` which can be evaluated later using `cm_eval()`. On failure, `cm_compile()` will return 0 and optionally set the passed in `*error` to the location of the parse error.
+IR opcodes include `CM_OP_CONST, VAR, ADD, SUB, MUL, DIV, NEG, SQRT, ADD_K, MUL_K, RECIP, POWI, FMA, ABS`.
 
-You can also compile expressions without variables by passing `cm_compile()`'s second and third arguments as 0.
+Minimal batch usage:
 
-A `cm_expr*` must be given to `cm_eval()` from `cm_compile()`; `cm_eval()` will then evaluate the expression using the current variable values. 
+    // Build IR for: y = 0.5 * (fma(u, v, w) + fabs(w))
+    cm_program* p = build_program_somehow();   // your IR builder
+    // JIT
+    cm_jit_fn_batch fn; void* st = NULL;
+    cm_llvm_jit_compile_batch(p->code, p->n_insts, p->num_vars, p->num_slots, p->result_slot, &fn, &st);
+    // Execute on SoA inputs
+    const double* inputs[] = {U, V, W}; // SoA arrays for vars 0,1,2
+    fn(inputs, N, OUT);
+    cm_llvm_jit_release(st);
 
-At the end, remember to invoke `cm_free()`.
+## Building
+- Interpreter only: just add `cmath.c`/`cmath.h` to your project. No dependencies.
+- With JIT:
+    - Requires LLVM (tested with LLVM 17/18 on Apple Silicon).
+    - CMake tips:
+        - `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+        - Optionally point compilers at your LLVM toolchain:
+            - `-DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang`
+            - `-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++`
 
-#### Usage
-```c
-double x, y;
-// Variable names and pointers
-cm_variables vars[] = {{"x", &x}, {"y", &y}};
+## What’s new in this version (techniques used)
+Front‑end and algebra:
+- IR with simple opcodes and immediate forms (`ADD_K`, `MUL_K`, `RECIP`, `POWI`, `FMA`, `ABS`).
+- Constant folding, common subexpression elimination, dead code elimination.
+- Peepholes:
+    - FMA fusion from add/sub‑of‑mul shapes to a single `llvm.fma`.
+    - sqrt(x*x)→fabs(x) rewrite (mathematically exact, cheaper than sqrt).
+    - Integer power lowering with small‑exponent specialization and exponent clamp.
 
-int err;
-// Compile the expression with variables
-cm_expr *expr = cm_compile("sqrt(x^2+y^2)", vars, 2, &err);
+JIT codegen:
+- ORC `LLJIT` backend, per‑module O3 pipeline via `PassBuilder`.
+- Fast‑math flags on FP ops and intrinsics; explicit `llvm.fma`, `llvm.sqrt`, `llvm.fabs`.
+- Opaque‑pointer migration: `PointerType::getUnqual(Context)` + typed GEP/loads/stores.
 
-if (expr) {
-	x = 3; y = 4;
-	const double h1 = cm_eval(expr); // Returns 5
-	
-	x = 5; y = 12;
-	const double h2 = cm_eval(expr); // Returns 13
-	
-	cm_free(expr);
-} else {
-	printf("Parse error at %d\n", err);
-}
-```
+Batch kernel (SoA):
+- Single tight loop with:
+    - Loop metadata hints for vectorize/unroll/interleave.
+    - Optional prefetch of future elements.
+    - `noalias`/`readonly`/`writeonly` parameter attributes when safe.
+    - Alignment assumptions exposed to LLVM.
+    - Optional nontemporal stores for streaming `out[i]`.
 
-#### Longer example
-Here is an example where an expression is passed from the command line and evaluated. It also does error checking and binds the variables `x` and `y` to *3* and *4*, respectively.
-
-```c
-#include "cmath.h"
-#include <stdio.h>
-
-int main(int argc, char *argv[])
-{
-	if (argc < 2) {
-		printf("Usage: example \"expression\"\n");
-		return 0;
-	}
-
-	const char *expression = argv[1];
-	printf("Evaluating:\n\t%s\n", expression);
-
-	// Variables are bound at program evaluation
-	double x, y;
-	cm_variable vars[] = {{"x", &x}, {"y", &y}};
-
-	// Check for errors
-	int err;
-	cm_expr *n = cm_compile(expression, vars, 2, &err);
-
-	if (n) {
-		// It is efficient because variables can now be called as many 
-		// times as you want because parsing has already been done
-		x = 3; y = 4;
-		const double r = cm_eval(n); printf("Result:\n\t%f\n", r);
-		cm_free(n);
-	} else {
-		// Show error
-		printf("\t%*s^\nError near here", err-1, "");
-	}
-
-	return 0;
-}
-
-```
-
-Which produces the output:
-```
-$	example "sqrt(x^2+y2)"
-	Evaluating:
-		sqrt(x^2+y2)
-			 ^
-	Error near here
-```
+Portability and tooling:
+- Works with recent clang/LLVM (17–18) on Apple Silicon; interpreter remains portable C.
 
 ## Speed
-CMath is fast compared to C in all regards. 
+Below is the main SoA throughput test that compares batch JIT vs a native batch loop.
+- Platform: Apple Silicon (aarch64), N=1,048,576 elements per run.
+- Accuracy check (10,000 samples): max abs error = `0.000e+00`; mean abs error = `0.000e+00`.
 
-Here are some example performance numbers taken from a benchmark:
+Throughput (SoA), representative run:
 
-|**Expression** |**`cm_eval` time**| **native C time** | **difference**|
-|----------------------|----------------------------|---------------------------|---------------------|
-|`sqrt(a^1.5+a^2.5)`|14.478 ms|15.641 ms|8% faster|
-|`a+5`|563 ms|765 ms|36% faster|
-|`a+(5*2)`|563 ms|765 ms|36% faster|
-|`(a+5)*2`|563 ms|1422 ms|153% faster|
-|`(1/(a+1)+2/(a+2)+3/(a+3))`|1266 ms | 5516 ms | 336% faster|
+    JIT batch (fused):    1257.29 M eval/s   (time ~0.001 s)
+    Native batch (fused):  882.64 M eval/s   (time ~0.001 s)
+    Ratio (JIT/native):       1.42×  (JIT faster)
 
+For the best JIT performance on large streaming kernels, I have found that
+- In the native reference, it is better to prefer `__builtin_fma`, `__builtin_fabs` (or enable `-ffp-contract=fast`) to avoid libm calls that inhibit vectorization.
+- Align inputs/outputs (e.g., 64 bytes) and set `cm_jit_options.alignment` accordingly.
+- If `out[]` is not reread soon, set `opts.nontemporal_store = 1`.
+- Consider moderate `unroll_hint`/`interleave_hint`, and `prefetch_distance` for regular access patterns.
 
 ## Grammar
-CMath uses and parses the following grammar:
-```
-<list>      =    <expr> {"," <expr>}
-<expr>      =    <term> {("+" | "-") <term>}
-<term>      =    <factor> {("*" | "/" | "%") <factor>}
-<factor>    =    <power> {"^" <power>}
-<power>     =    {("-" | "+")} <base>
-<base>      =    <constant> | <variable> | <function-0> {"(" ")"} | <function-1> <power> | <function-2> "(" <expr> "," <expr> ")" | "(" <list> ")"
-```
-- Also, whitespace between tokens are ignored. 
+    <list>      =    <expr> {"," <expr>}
+    <expr>      =    <term> {("+" | "-") <term>}
+    <term>      =    <factor> {("*" | "/" | "%") <factor>}
+    <factor>    =    <power> {"^" <power>}
+    <power>     =    {("-" | "+")} <base>
+    <base>      =    <constant> | <variable> | <function-0> {"(" ")"} | <function-1> <power> | <function-2> "(" <expr> "," <expr> ")" | "(" <list> ")"
 
-- Valid variable names are any combinations of lower case letters from *a* to *z*. 
-
-- Constants can be integers, decimals, or in scientific notation (e.g., 1e3).
-
-- A leading zero is not required 
+- Whitespace between tokens is ignored.
+- Variables: lowercase a–z.
+- Constants: integers, decimals, scientific notation (e.g., 1e3).
+- Exponentiation associates left‑to‑right.
 
 ## Functions supported
-CMath supports addition, subtraction, multiplication, division, exponentiation and modulus with normal operator precedence (one exception being that exponentiation is evaluated left-to-right).
+- Operators: +, −, *, /, %, ^ (see precedence above)
+- Math functions:
+  abs (fabs), acos, asin, atan, atan2, ceil, cos, cosh, exp, floor, ln (log), log (log10), pow, sin, sinh, sqrt, tan, tanh
+- Constants: `pi`, `e`
 
-Additionally, following C mathematical functions are also supported:
+## License
+GNU GPL v3
 
-- `abs` (`fabs`)
-- `acos`
-- `asin`
-- `atan`
-- `atan2`
-- `ceil`
-- `cos
-- `cosh`
-- `exp`
-- `floor`
-- `ln` (`log`)
-- `log` (`log10`)
-- `pow`
-- `sin`
-- `sinh`
-- `sqrt`
-- `tan`
-- `tanh`
-
-The following constants are also available:
-
-- `pi`
-- `e`
-
----
-
-- All functions/types start with `cm`
