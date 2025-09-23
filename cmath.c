@@ -30,6 +30,7 @@ struct cm_program {
     size_t scratch_cap;
 };
 
+// FIXME: change buffer cap to > 1
 static int cm_ensure_capacity(cm_program *p, size_t extra) {
     if (p->n_insts + extra <= p->inst_cap) return 0;
     size_t new_cap = p->inst_cap ? p->inst_cap : CM_INIT_INSTR_CAP;
@@ -42,7 +43,7 @@ static int cm_ensure_capacity(cm_program *p, size_t extra) {
 }
 
 static uint32_t cm_alloc_slot(cm_program *p) {
-    uint32_t s = (uint32_t) p->num_slots;
+    const uint32_t s = (uint32_t) p->num_slots;
     p->num_slots++;
     return s;
 }
@@ -56,7 +57,7 @@ static uint32_t cm_emit_raw(cm_program *p, cm_instr ins) {
 
 // API impl (emission)
 uint32_t cm_emit_const(cm_program *p, double value) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_CONST;
     i.dst = d;
@@ -65,7 +66,7 @@ uint32_t cm_emit_const(cm_program *p, double value) {
 }
 
 uint32_t cm_emit_var(cm_program *p, uint32_t vi) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_VAR;
     i.dst = d;
@@ -74,7 +75,7 @@ uint32_t cm_emit_var(cm_program *p, uint32_t vi) {
 }
 
 uint32_t cm_emit_neg(cm_program *p, uint32_t a) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_NEG;
     i.dst = d;
@@ -83,7 +84,7 @@ uint32_t cm_emit_neg(cm_program *p, uint32_t a) {
 }
 
 uint32_t cm_emit_sqrt(cm_program *p, uint32_t a) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_SQRT;
     i.dst = d;
@@ -92,7 +93,7 @@ uint32_t cm_emit_sqrt(cm_program *p, uint32_t a) {
 }
 
 uint32_t cm_emit_recip(cm_program *p, uint32_t a) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_RECIP;
     i.dst = d;
@@ -101,7 +102,7 @@ uint32_t cm_emit_recip(cm_program *p, uint32_t a) {
 }
 
 uint32_t cm_emit_powi(cm_program *p, uint32_t a, int e) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_POWI;
     i.dst = d;
@@ -113,7 +114,7 @@ uint32_t cm_emit_powi(cm_program *p, uint32_t a, int e) {
 }
 
 uint32_t cm_emit_add(cm_program *p, uint32_t a, uint32_t b) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_ADD;
     i.dst = d;
@@ -123,7 +124,7 @@ uint32_t cm_emit_add(cm_program *p, uint32_t a, uint32_t b) {
 }
 
 uint32_t cm_emit_sub(cm_program *p, uint32_t a, uint32_t b) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_SUB;
     i.dst = d;
@@ -133,7 +134,7 @@ uint32_t cm_emit_sub(cm_program *p, uint32_t a, uint32_t b) {
 }
 
 uint32_t cm_emit_mul(cm_program *p, uint32_t a, uint32_t b) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_MUL;
     i.dst = d;
@@ -143,7 +144,7 @@ uint32_t cm_emit_mul(cm_program *p, uint32_t a, uint32_t b) {
 }
 
 uint32_t cm_emit_div(cm_program *p, uint32_t a, uint32_t b) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_DIV;
     i.dst = d;
@@ -153,7 +154,7 @@ uint32_t cm_emit_div(cm_program *p, uint32_t a, uint32_t b) {
 }
 
 uint32_t cm_emit_add_k(cm_program *p, uint32_t a, double k) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_ADD_K;
     i.dst = d;
@@ -163,7 +164,7 @@ uint32_t cm_emit_add_k(cm_program *p, uint32_t a, double k) {
 }
 
 uint32_t cm_emit_mul_k(cm_program *p, uint32_t a, double k) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_MUL_K;
     i.dst = d;
@@ -173,7 +174,7 @@ uint32_t cm_emit_mul_k(cm_program *p, uint32_t a, double k) {
 }
 
 uint32_t cm_emit_fma(cm_program *p, uint32_t a, uint32_t b, uint32_t c) {
-    uint32_t d = cm_alloc_slot(p);
+    const uint32_t d = cm_alloc_slot(p);
     cm_instr i = {0};
     i.op = CM_OP_FMA;
     i.dst = d;
@@ -234,7 +235,7 @@ int cm_jit_globally_supported(void) { return cm_llvm_jit_supported(); }
 int cm_prog_is_jitted(const cm_program *p) { return p ? p->jitted : 0; }
 int cm_prog_is_jitted_batch(const cm_program *p) { return p ? p->jitted_batch : 0; }
 
-// Interpreter (scalar) with reusable scratch
+// interpreter (scalar) with reusable scratch
 static double cm_eval_interpreter(cm_program *p, const double *vars) {
     if (p->num_slots == 0) return 0.0;
     if (p->scratch_cap < p->num_slots) {
@@ -281,15 +282,15 @@ static double cm_eval_interpreter(cm_program *p, const double *vars) {
                 else if (e == 1) r = x;
                 else if (e == -1) r = 1.0 / x;
                 else {
-                    int neg = e < 0;
-                    unsigned k = (unsigned) (neg ? -e : e);
+                    const int neg = e < 0;
+                    const unsigned k = (unsigned) (neg ? -e : e);
                     switch (k) {
                         case 2: r = x * x;
                             break;
                         case 3: r = (x * x) * x;
                             break;
                         case 4: {
-                            double xx = x * x;
+                            const double xx = x * x;
                             r = xx * xx;
                             break;
                         }
@@ -322,7 +323,7 @@ static int cm_compile_inner(cm_program *p, const cm_jit_options *opts) {
     if (cm_llvm_jit_supported()) {
         cm_jit_fn fn = NULL;
         void *st = NULL;
-        cm_jit_options local = *opts;
+        const cm_jit_options local = *opts;
         const int rc = cm_llvm_jit_compile_ex(p->code, p->n_insts, p->num_vars, p->num_slots, p->result_slot,
                                         &local, &fn, &st);
         if (rc == 0 && fn) {
@@ -353,7 +354,7 @@ double cm_eval(const cm_program *pconst, const double *vars) {
     return cm_eval_interpreter(p, vars);
 }
 
-// Batch compile/eval
+// batch compile/eval
 static int cm_compile_batch_inner(cm_program *p, const cm_jit_options *opts) {
     if (!p) return 1;
     if (p->n_insts == 0) {
@@ -365,8 +366,8 @@ static int cm_compile_batch_inner(cm_program *p, const cm_jit_options *opts) {
     if (cm_llvm_jit_supported()) {
         cm_jit_fn_batch fn = NULL;
         void *st = NULL;
-        cm_jit_options local = *opts;
-        int rc = cm_llvm_jit_compile_batch_ex(p->code, p->n_insts, p->num_vars, p->num_slots, p->result_slot,
+        const cm_jit_options local = *opts;
+        const int rc = cm_llvm_jit_compile_batch_ex(p->code, p->n_insts, p->num_vars, p->num_slots, p->result_slot,
                                               &local, &fn, &st);
         if (rc == 0 && fn) {
             p->jit_fn_batch = fn;
@@ -378,7 +379,7 @@ static int cm_compile_batch_inner(cm_program *p, const cm_jit_options *opts) {
 }
 
 int cm_compile_batch(cm_program *p) {
-    cm_jit_options o = {
+    const cm_jit_options o = {
         .opt_level = 3, .enable_const_fold = 1, .enable_cse = 1, .enable_dce = 1, .enable_auto_fma = 1, .powi_limit = 8,
         .vec_width_hint = 0, .interleave_hint = 2, .unroll_hint = 4, .alignment = 32, .prefetch_distance = 64,
         .block_size = 0,
@@ -389,20 +390,20 @@ int cm_compile_batch(cm_program *p) {
 
 int cm_compile_batch_ex(cm_program *p, const cm_jit_options *opts) { return cm_compile_batch_inner(p, opts); }
 
-// Portable vectorized C fallback for batch (SoA)
+// portable vectorized C fallback for batch (SoA)
 void cm_eval_batch(const cm_program *pconst,
                    const double *const*inputs, size_t n, double *out) {
     cm_program *p = (cm_program *) pconst;
     if (!p) return;
 
-    // Use JIT batch if present
+    // use JIT batch if present
     if (p->jitted_batch && p->jit_fn_batch) {
         p->jit_fn_batch(inputs, n, out);
         return;
     }
 
-    // Otherwise, evaluate per element using the existing scalar path.
-    // We avoid per-iter allocations by using a small fixed local buffer,
+    // otherwise evaluate per element using the existing scalar path.
+    // we avoid per-iter allocations by using a small fixed local buffer,
     // and only heap-alloc if num_vars exceeds the fixed size.
     const size_t NV = p->num_vars;
     double small_buf[16];

@@ -15,8 +15,6 @@ test_optimization
 *test*
 !test/
 !test/*.c
-*benchmark*
-
 
 
 
