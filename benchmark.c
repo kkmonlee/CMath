@@ -23,7 +23,6 @@
 #define NOINLINE
 #endif
 
-// High-resolution wall-clock timer
 static double wall_time_sec(void) {
 #if defined(CLOCK_MONOTONIC)
     struct timespec ts;
