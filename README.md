@@ -22,86 +22,89 @@ Use it to evaluate mathematical expressions at runtime and bind variables withou
 - Deterministic numerics: JIT, interpreter, and native agree within FP roundoff; see benchmark accuracy checks.
 
 ## Example (interpreter)
-    #include "cmath.h"
-    printf("%f\n", cm_interp("5*5", 0)); /* Prints 25 */
-
+```c++
+#include "cmath.h"
+printf("%f\n", cm_interp("5*5", 0)); /* Prints 25 */
+```
 ## Interpreter API
 CMath defines these functions (no LLVM required):
-
-    double  cm_interp(const char *expression, int *error);
-    cm_expr* cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error);
-    double  cm_eval(const cm_expr *expr);
-    void     cm_free(cm_expr *expr);
-
+```c++
+double  cm_interp(const char *expression, int *error);
+cm_expr* cm_compile(const char *expression, const cm_variable *variables, int var_count, int *error);
+double  cm_eval(const cm_expr *expr);
+void     cm_free(cm_expr *expr);
+```
 - cm_interp: parse + evaluate in one call (returns NaN on parse error; optionally sets error position).
 - cm_compile/cm_eval/cm_free: compile once, evaluate many times with current variable bindings.
 
 Quick example with variables:
-
-    double x=3, y=4;
-    cm_variable vars[] = {{"x",&x}, {"y",&y}};
-    int err = 0;
-    cm_expr* e = cm_compile("sqrt(x^2+y^2)", vars, 2, &err);
-    if (e) {
-      printf("%f\n", cm_eval(e));  // 5.0
-      cm_free(e);
-    }
-
+```c++
+double x=3, y=4;
+cm_variable vars[] = {{"x",&x}, {"y",&y}};
+int err = 0;
+cm_expr* e = cm_compile("sqrt(x^2+y^2)", vars, 2, &err);
+if (e) {
+  printf("%f\n", cm_eval(e));  // 5.0
+  cm_free(e);
+}
+```
 ## Optional LLVM JIT API (accelerator)
 Include `cmath_jit_llvm.h` when building with LLVM available:
+```c++
+// Capability
+int cm_llvm_jit_supported(void);
 
-    // Capability
-    int cm_llvm_jit_supported(void);
+// Scalar JIT
+typedef double (*cm_jit_fn)(const double* vars);
+int cm_llvm_jit_compile(const cm_instr* code, size_t n_insts,
+                        size_t num_vars, size_t num_slots, uint32_t result_slot,
+                        cm_jit_fn* out_fn, void** out_state);
 
-    // Scalar JIT
-    typedef double (*cm_jit_fn)(const double* vars);
-    int cm_llvm_jit_compile(const cm_instr* code, size_t n_insts,
-                            size_t num_vars, size_t num_slots, uint32_t result_slot,
-                            cm_jit_fn* out_fn, void** out_state);
+// Batch JIT (SoA)
+typedef void (*cm_jit_fn_batch)(const double* const* inputs, size_t n, double* out);
+int cm_llvm_jit_compile_batch(const cm_instr* code, size_t n_insts,
+                              size_t num_vars, size_t num_slots, uint32_t result_slot,
+                              cm_jit_fn_batch* out_fn, void** out_state);
 
-    // Batch JIT (SoA)
-    typedef void (*cm_jit_fn_batch)(const double* const* inputs, size_t n, double* out);
-    int cm_llvm_jit_compile_batch(const cm_instr* code, size_t n_insts,
-                                  size_t num_vars, size_t num_slots, uint32_t result_slot,
-                                  cm_jit_fn_batch* out_fn, void** out_state);
+// Tunables (optional)
+typedef struct cm_jit_options {
+  int opt_level;               // 0..3 (default 3)
+  int enable_const_fold;       // default 1
+  int enable_cse;              // default 1
+  int enable_dce;              // default 1
+  int enable_auto_fma;         // default 1
+  int powi_limit;              // default 8
+  int vec_width_hint;          // 0=auto (default 0)
+  int interleave_hint;         // default 2
+  int unroll_hint;             // default 4
+  int alignment;               // assumed input/out alignment bytes (default 16)
+  int prefetch_distance;       // 0 disables (default 64)
+  int block_size;              // strip mine size (default 0=off)
+  int assume_noalias;          // add noalias/readonly/writeonly (default 1)
+  int nontemporal_store;       // mark out[i] as nontemporal (default 0)
+} cm_jit_options;
 
-    // Tunables (optional)
-    typedef struct cm_jit_options {
-      int opt_level;               // 0..3 (default 3)
-      int enable_const_fold;       // default 1
-      int enable_cse;              // default 1
-      int enable_dce;              // default 1
-      int enable_auto_fma;         // default 1
-      int powi_limit;              // default 8
-      int vec_width_hint;          // 0=auto (default 0)
-      int interleave_hint;         // default 2
-      int unroll_hint;             // default 4
-      int alignment;               // assumed input/out alignment bytes (default 16)
-      int prefetch_distance;       // 0 disables (default 64)
-      int block_size;              // strip mine size (default 0=off)
-      int assume_noalias;          // add noalias/readonly/writeonly (default 1)
-      int nontemporal_store;       // mark out[i] as nontemporal (default 0)
-    } cm_jit_options;
+int cm_llvm_jit_compile_ex(..., const cm_jit_options* opts, ...);
+int cm_llvm_jit_compile_batch_ex(..., const cm_jit_options* opts, ...);
 
-    int cm_llvm_jit_compile_ex(..., const cm_jit_options* opts, ...);
-    int cm_llvm_jit_compile_batch_ex(..., const cm_jit_options* opts, ...);
-
-    // Release JIT state
-    void cm_llvm_jit_release(void* state);
+// Release JIT state
+void cm_llvm_jit_release(void* state);
+```
 
 IR opcodes include `CM_OP_CONST, VAR, ADD, SUB, MUL, DIV, NEG, SQRT, ADD_K, MUL_K, RECIP, POWI, FMA, ABS`.
 
 Minimal batch usage:
-
-    // Build IR for: y = 0.5 * (fma(u, v, w) + fabs(w))
-    cm_program* p = build_program_somehow();   // your IR builder
-    // JIT
-    cm_jit_fn_batch fn; void* st = NULL;
-    cm_llvm_jit_compile_batch(p->code, p->n_insts, p->num_vars, p->num_slots, p->result_slot, &fn, &st);
-    // Execute on SoA inputs
-    const double* inputs[] = {U, V, W}; // SoA arrays for vars 0,1,2
-    fn(inputs, N, OUT);
-    cm_llvm_jit_release(st);
+```c++
+// Build IR for: y = 0.5 * (fma(u, v, w) + fabs(w))
+cm_program* p = build_program_somehow();   // your IR builder
+// JIT
+cm_jit_fn_batch fn; void* st = NULL;
+cm_llvm_jit_compile_batch(p->code, p->n_insts, p->num_vars, p->num_slots, p->result_slot, &fn, &st);
+// Execute on SoA inputs
+const double* inputs[] = {U, V, W}; // SoA arrays for vars 0,1,2
+fn(inputs, N, OUT);
+cm_llvm_jit_release(st);
+```
 
 ## Building
 - Interpreter only: just add `cmath.c`/`cmath.h` to your project. No dependencies.
