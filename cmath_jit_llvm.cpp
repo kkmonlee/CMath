@@ -43,10 +43,10 @@ namespace {
         o.enable_auto_fma = 1;
         o.powi_limit = 8;
         o.vec_width_hint = 0;
-        o.interleave_hint = 2;
+        o.interleave_hint = 4;
         o.unroll_hint = 4;
         o.alignment = 16;
-        o.prefetch_distance = 64;
+        o.prefetch_distance = 128;
         o.block_size = 0;
         o.assume_noalias = 1;
         o.nontemporal_store = 0;
@@ -120,21 +120,37 @@ namespace {
         const bool neg = e < 0;
         const auto k = static_cast<unsigned>(neg ? -e : e);
         Value *acc = nullptr;
+        auto *xx = b.CreateFMul(x, x, "xx");
         switch (k) {
-            case 2: acc = b.CreateFMul(x, x, "sq");
+            case 2: acc = xx;
                 break;
-            case 3: {
-                auto *xx = b.CreateFMul(x, x, "xx");
-                acc = b.CreateFMul(xx, x, "x3");
+            case 3: acc = b.CreateFMul(xx, x, "x3");
+                break;
+            case 4: acc = b.CreateFMul(xx, xx, "x4");
+                break;
+            case 5: {
+                auto *x4 = b.CreateFMul(xx, xx, "x4");
+                acc = b.CreateFMul(x4, x, "x5");
                 break;
             }
-            case 4: {
-                auto *xx = b.CreateFMul(x, x, "xx");
-                acc = b.CreateFMul(xx, xx, "x4");
+            case 6: {
+                auto *x3 = b.CreateFMul(xx, x, "x3");
+                acc = b.CreateFMul(x3, x3, "x6");
+                break;
+            }
+            case 7: {
+                auto *x3 = b.CreateFMul(xx, x, "x3");
+                auto *x6 = b.CreateFMul(x3, x3, "x6");
+                acc = b.CreateFMul(x6, x, "x7");
+                break;
+            }
+            case 8: {
+                auto *x4 = b.CreateFMul(xx, xx, "x4");
+                acc = b.CreateFMul(x4, x4, "x8");
                 break;
             }
             default: {
-                acc = b.CreateFMul(x, x, "p2");
+                acc = xx;
                 for (unsigned i = 2; i < k; ++i) acc = b.CreateFMul(acc, x, "p");
                 break;
             }
@@ -676,17 +692,26 @@ namespace {
                         else {
                             int neg = e < 0;
                             auto k = static_cast<unsigned>(neg ? -e : e);
+                            double xx = x * x;
                             switch (k) {
-                                case 2: r = x * x;
+                                case 2: r = xx;
                                     break;
-                                case 3: r = (x * x) * x;
+                                case 3: r = xx * x;
                                     break;
-                                case 4: {
-                                    double xx = x * x;
-                                    r = xx * xx;
+                                case 4: r = xx * xx;
+                                    break;
+                                case 5: r = xx * xx * x;
+                                    break;
+                                case 6: r = xx * xx * xx;
+                                    break;
+                                case 7: r = xx * xx * xx * x;
+                                    break;
+                                case 8: {
+                                    double xxxx = xx * xx;
+                                    r = xxxx * xxxx;
                                     break;
                                 }
-                                default: r = x * x;
+                                default: r = xx;
                                     for (unsigned i = 2; i < k; ++i)r *= x;
                                     break;
                             }
@@ -775,6 +800,32 @@ namespace {
                             ins.imm = 0.0;
                         }
                     }
+                }
+            }
+            rebuild_use(use);
+        }
+
+        if (opts.enable_const_fold) {
+            for (auto &ins: ir.code) {
+                // x + 0 = x, x * 1 = x
+                if (ins.op == CM_OP_ADD_K && ins.imm == 0.0) {
+                    ins.op = CM_OP_ADD_K;
+                }
+                if (ins.op == CM_OP_MUL_K) {
+                    if (ins.imm == 1.0) {
+                        ins.op = CM_OP_ADD_K;
+                        ins.imm = 0.0;
+                    } else if (ins.imm == 0.0) {
+                        ins.op = CM_OP_CONST;
+                        ins.imm = 0.0;
+                        ins.a = 0;
+                    }
+                }
+                // Strength reduction: x / const -> x * (1/const)
+                if (ins.op == CM_OP_DIV && is_const[ins.b] && const_val[ins.b] != 0.0) {
+                    ins.op = CM_OP_MUL_K;
+                    ins.imm = 1.0 / const_val[ins.b];
+                    ins.b = 0;
                 }
             }
             rebuild_use(use);
